@@ -145,11 +145,11 @@ def HVramp_tab():
         value=False
     )
 
-    mode = st.radio(
-        "Operation mode",
-        ["Ramp-Up", "Ramp-Down"],
-        horizontal=True
-    )
+    # mode = st.radio(
+    #     "Operation mode",
+    #     ["Ramp-Up", "Ramp-Down"],
+    #     horizontal=True
+    # )
 
     st.markdown(
         """
