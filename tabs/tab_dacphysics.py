@@ -1,5 +1,5 @@
 import streamlit as st
-from backend.dacphysics import vtp_to_electrons, electrons_to_vtp, thlDAC_to_electrons, electrons_to_thlDAC
+from backend.dacphysics import vtp_to_electrons, electrons_to_vtp, thlDAC_to_electrons, electrons_to_thlDAC, vtpDAC_to_electrons
 from backend.dacphysics import VTP_DAC_STEP_MV, E_CHARGE
 
 def dacphysics_tab():
@@ -28,8 +28,12 @@ def dacphysics_tab():
     with col6:
         vtpC_dac_value = st.number_input("VTP Coarse DAC", value=100, step=1)
 
+    with col7:
+        vtpF_dac_value = st.number_input("VTP Fine DAC", value=200, step=1)
+
     electrons_from_pulse = vtp_to_electrons(pulse_mV, capacitance_fF)
     electrons_from_thlDAC = thlDAC_to_electrons(thl_dac_value, slope=thl_per_electron, intercept=thl_intercept)
+    electrons_from_vtpDAC = vtpDAC_to_electrons(vtpF_DAC=vtpF_dac_value, vtpC_DAC=vtpC_dac_value, C_fF=capacitance_fF)
 
     st.markdown('''
         :red[Calculated values:]
@@ -37,3 +41,4 @@ def dacphysics_tab():
 
     st.markdown(f"**Test Pulse height** {pulse_mV} mV is {electrons_from_pulse:.1f} electrons")
     st.markdown(f"**THL Combined DAC** {thl_dac_value} is {electrons_from_thlDAC:.1f} electrons")
+    st.markdown(f"**VTP DACs** Fine: {vtpF_dac_value}, Coarse: {vtpC_dac_value} is {electrons_from_vtpDAC:.1f} electrons")

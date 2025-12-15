@@ -42,3 +42,4 @@ def electrons_to_vtpFDAC(electrons, vtpC_DAC=100, C_fF=3.0):
         raise ValueError("Calculated VTP Fine DAC value out of range (0-511), consider changing VTP Coarse DAC value.")
     else:
         return int(round(vtpF_DAC))
+    
