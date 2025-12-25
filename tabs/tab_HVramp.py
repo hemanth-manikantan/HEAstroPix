@@ -20,24 +20,24 @@ hv_steps = {
     "step": list(range(1, 64)),
     "Vgrid_CH3": [
         0, 50, 100, 150, 200, 250, 275, 300, 325, 325, 325, 325, 325, 325, 325, 
-        325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 335, 
-        345, 355, 365, 375, 385, 395, 405, 410, 410, 410, 410, 410, 410, 410, 
-        410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 
-        410, 410, 410, 410, 410, 410
+        325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 335, 345, 
+        355, 365, 375, 385, 395, 405, 410, 410, 410, 410, 410, 410, 410, 410, 410, 
+        410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 410, 
+        410, 410, 410
     ],
     "Vanode_CH2": [
         0, 50, 100, 150, 200, 250, 275, 300, 325, 325, 325, 325, 325, 325, 325, 
-        325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 335,
-          345, 355, 365, 375, 385, 395, 405, 410, 420, 430, 440, 450, 460, 460, 
-          460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 
-          460, 460, 470, 480, 490, 510
+        325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 325, 335, 345, 
+        355, 365, 375, 385, 395, 405, 410, 420, 430, 440, 450, 460, 460, 460, 460, 
+        460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 460, 470, 
+        480, 490, 510
     ],
     "Vcathode_CH1": [
         50, 100, 150, 200, 250, 300, 325, 350, 375, 425, 475, 525, 575, 625, 675,
         725, 775, 825, 875, 925, 975, 1025, 1075, 1125, 1175, 1225, 1275, 1325, 1325, 1325, 
-        1325, 1325, 1325, 1325, 1325, 1325, 1325, 1375, 1425, 1475, 1525, 1575, 1625, 1675, 
-        1725, 1775, 1825, 1875, 1925, 2025, 2075, 2125, 2175, 2225, 2275, 2325, 2375, 
-        2425, 2460, 2480, 2480, 2490, 2510
+        1325, 1325, 1325, 1325, 1325, 1325, 1325, 1375, 1425, 1475, 1525, 1575, 1625, 1675, 1725, 
+        1775, 1825, 1875, 1925, 1975, 2025, 2075, 2125, 2175, 2225, 2275, 2325, 2375, 2425, 2470, 
+        2480, 2490, 2510
     ]
 }
 
@@ -87,6 +87,12 @@ def handle_checkbox_change(key, step, channel, checked, i):
             vcathode=hv_steps["Vcathode_CH1"][i],
         )
         st.session_state[prev_key] = checked
+
+#Two functions to disble checkbox of same values in consecuitive stepss
+def same_as_previous(arr, i):
+    return i > 0 and arr[i] == arr[i - 1]
+def same_as_next(arr, i):
+    return i < len(arr) - 1 and arr[i] == arr[i + 1]
 
 # Show UI
 def HVramp_tab():
@@ -143,7 +149,7 @@ def HVramp_tab():
 
     edit_enabled = st.toggle(
         "🔓 Enable editing (HV operation in progress)",
-        value=False
+        value=True
     )
 
     st.markdown(
@@ -167,9 +173,23 @@ def HVramp_tab():
 
     st.divider()
 
+    #Use session state variable (key) to read ramp direction radio button anywhere in the code 
+    is_ramp_up = st.session_state.get("ramp_direction", "⬆ Ramp Up (default)") == "⬆ Ramp Up (default)"
+
     # ---- steps ----
     for i, step in enumerate(hv_steps["step"]):
-        cols = st.columns([1, 2.5, 2.5, 2.5, 1, 3, 1])
+
+        # Disable checkbox if voltage is same as previous step RU or vice versa RD
+        if is_ramp_up:
+            disable_ch3 = same_as_previous(hv_steps["Vgrid_CH3"], i)
+            disable_ch2 = same_as_previous(hv_steps["Vanode_CH2"], i)
+            disable_ch1 = same_as_previous(hv_steps["Vcathode_CH1"], i)
+        else:  # ramp down
+            disable_ch3 = same_as_next(hv_steps["Vgrid_CH3"], i)
+            disable_ch2 = same_as_next(hv_steps["Vanode_CH2"], i)
+            disable_ch1 = same_as_next(hv_steps["Vcathode_CH1"], i)
+
+        cols = st.columns([1, 2.5, 2.5, 2.5, 1, 3, 1])#Col sizes
 
         with cols[0]:#Step number
             st.markdown(f"**{step:02d}**")
@@ -177,10 +197,15 @@ def HVramp_tab():
 
         with cols[1]:# CH3 Grid
             key_ch3 = f"s{step:02d}_ch3"
+            if disable_ch3:
+                if is_ramp_up:#Auto check the box if reccuring value
+                    st.session_state[key_ch3] = True
+                else:  #Auto-uncheck the box if reccuring value
+                    st.session_state[key_ch3] = False
             ch3 = st.checkbox(
                 f"CH3 → **{hv_steps['Vgrid_CH3'][i]} V**",
                 key=f"s{step:02d}_ch3",
-                disabled=not edit_enabled
+                disabled=(not edit_enabled) or disable_ch3
             )
             handle_checkbox_change(
                 key_ch3, step, "CH3", ch3, i
@@ -188,10 +213,15 @@ def HVramp_tab():
 
         with cols[2]:# CH2 Anode
             key_ch2 = f"s{step:02d}_ch2"
+            if disable_ch2:
+                if is_ramp_up:#Auto check the box if reccuring value
+                    st.session_state[key_ch2] = True
+                else:  #Auto-uncheck the box if reccuring value
+                    st.session_state[key_ch2] = False
             ch2 = st.checkbox(
                 f"CH2 → **{hv_steps['Vanode_CH2'][i]} V**",
                 key=f"s{step:02d}_ch2",
-                disabled=not edit_enabled
+                disabled=(not edit_enabled) or disable_ch2
             )
             handle_checkbox_change(
                 key_ch2, step, "CH2", ch2, i
@@ -199,10 +229,15 @@ def HVramp_tab():
 
         with cols[3]:#CH1 Cathode
             key_ch1 = f"s{step:02d}_ch1"
+            if disable_ch1:
+                if is_ramp_up:#Auto check the box if reccuring value
+                    st.session_state[key_ch1] = True
+                else:  #Auto-uncheck the box if reccuring value
+                    st.session_state[key_ch1] = False
             ch1 = st.checkbox(
                 f"CH1 → **{hv_steps['Vcathode_CH1'][i]} V**",
                 key=f"s{step:02d}_ch1",
-                disabled=not edit_enabled
+                disabled=(not edit_enabled) or disable_ch1
             )
             handle_checkbox_change(
                 key_ch1, step, "CH1", ch1, i
@@ -243,7 +278,7 @@ def HVramp_tab():
 
         st.divider()
 
-    #Fine tuning section after ramp (outside the loop for 31 steps)
+    #Fine tuning section after ramp (outside the loop for 63 steps)
     st.subheader("🔧 Post-Ramp Fine Tuning (Ramp-Up only)")
     fine_tune_enabled = (# Enavle fine tuning only if editing and logging are active
         edit_enabled
@@ -322,4 +357,15 @@ def HVramp_tab():
                 note=note_ft
             )
             st.toast("HV fine tune logged", icon="📝")#Display a short success message for csv save
-            st.session_state.ft_note_active = ""                
+            st.session_state.ft_note_active = ""
+
+    ramp_direction = st.radio(
+    "Ramp direction",
+    ["⬆ Ramp Up (default)", "⬇ Ramp Down"],
+    key='ramp_direction',
+    horizontal=True,
+)
+
+
+#Ramp Down
+#                 
