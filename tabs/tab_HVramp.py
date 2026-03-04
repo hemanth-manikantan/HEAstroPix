@@ -166,7 +166,7 @@ def HVramp_tab():
     header[0].markdown("**Step**")
     header[1].markdown("**CH3 (Vgrid)**")
     header[2].markdown("**CH2 (Vanode)**")
-    header[3].markdown("**CH1 (Vcathode)**")
+    header[3].markdown("**CH0 (Vcathode)**")
     header[4].markdown("**State**")
     header[5].markdown("**Note**")
     # header[6].markdown("**Add Log to note**")
@@ -235,7 +235,7 @@ def HVramp_tab():
                 else:  #Auto-uncheck the box if reccuring value
                     st.session_state[key_ch1] = False
             ch1 = st.checkbox(
-                f"CH1 → **{hv_steps['Vcathode_CH1'][i]} V**",
+                f"CH0 → **{hv_steps['Vcathode_CH1'][i]} V**",
                 key=f"s{step:02d}_ch1",
                 disabled=(not edit_enabled) or disable_ch1
             )

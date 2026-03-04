@@ -4,7 +4,8 @@ import time
 
 from backend.jobs import start_job, jobs, logs
 from tabs.tab_dacphysics import dacphysics_tab
-from tabs.tab_HVramp import HVramp_tab
+from tabs.tab_HVramp import HVramp_tab#Manual ramping (temp)
+from tabs.tab_HVramp_Caen import HVramp_Caen_tab#Caen HV unit
 
 st.set_page_config(layout="wide", page_title='HypeX Operations')
 st.title("HypeX Operations UI v0.1")
@@ -13,9 +14,10 @@ st.title("HypeX Operations UI v0.1")
 # -------------------------
 # MAIN FUNCTIONAL TABS (1) Calculator (2) HV Ramp (2) Data Interpreation/Morph (3) Analysis
 # -------------------------
-tab_dacphysics, tab_HVramp, tab_interpret, tab_analysis = st.tabs([
+tab_dacphysics, tab_HVramp, tab_CaenHVramp, tab_interpret, tab_analysis = st.tabs([
     "Calculator",
-    "HV Ramp-Up/Down procedure",
+    "HV Ramp-Up/Down manual procedure",
+    "Caen HV Ramp-Up/Down Auto",
     "Data Interpretation",
     "Analysis"
 ])
@@ -26,6 +28,9 @@ with tab_dacphysics:
 
 with tab_HVramp:
     HVramp_tab()
+
+with tab_CaenHVramp:
+    HVramp_Caen_tab()
 
 with tab_interpret:
     st.subheader("Data Interpretation")

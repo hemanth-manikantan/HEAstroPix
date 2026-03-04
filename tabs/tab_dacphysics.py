@@ -26,10 +26,10 @@ def dacphysics_tab():
     col6, col7, col8, col9, col10 = st.columns(5)
 
     with col6:
-        vtpC_dac_value = st.number_input("VTP Coarse DAC", value=100, step=1)
+        vtpC_dac_value = st.number_input("VTP Coarse DAC", value=100, step=1, min_value=0, max_value=255)
 
     with col7:
-        vtpF_dac_value = st.number_input("VTP Fine DAC", value=200, step=1)
+        vtpF_dac_value = st.number_input("VTP Fine DAC", value=200, step=1, min_value=0, max_value=255)
 
     electrons_from_pulse = vtp_to_electrons(pulse_mV, capacitance_fF)
     electrons_from_thlDAC = thlDAC_to_electrons(thl_dac_value, slope=thl_per_electron, intercept=thl_intercept)
