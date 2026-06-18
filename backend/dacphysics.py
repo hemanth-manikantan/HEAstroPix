@@ -43,3 +43,10 @@ def electrons_to_vtpFDAC(electrons, vtpC_DAC=100, C_fF=3.0):
     else:
         return int(round(vtpF_DAC))
     
+def electrons_to_tot(electrons=1000, a=0.05, b=10, c=7.51, t=51.91):
+    '''Convert Time-over-Threshold (ToT) to test pulse height (mV) to electrons using calibration parameters'''
+    '''This function assumes a non-linear relationship between ToT and pulse height. The parameters c and t are used to model this non-linearity. In the tpx3_gui, slope is 'a' and intercept is 'b' in the equation: mV = a * ToT + b + c / (t-ToT)'''
+    electrons_mV = electrons_to_vtp(electrons, C_fF=3.0)
+    tot = electrons_mV*a + b + c / (t - electrons_mV)
+    return tot
+    
