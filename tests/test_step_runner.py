@@ -1,0 +1,351 @@
+import shlex
+import sys
+import threading
+
+import pytest
+
+from backend.simulated_hv import SimulatedDetectorHV, SimulatedCaenDevice, SimClock
+from backend.step_runner import (RealClock, StepRunner, build_daq_argv, EXIT_OK, EXIT_ABORTED,
+                                 EXIT_REFUSED, EXIT_TRIP, EXIT_UNSAFE)
+from tests.helpers import MAP3, step
+
+YES = lambda: True
+
+
+def power_off_cmds(dev):
+    return [c for c in dev.commands if c[1] == "Pw" and c[3] == 0]
+
+
+def assert_safe_end(hv, tol=5.0):
+    dev = hv.device
+    assert all(abs(dev.ch[i]["vmon"]) <= tol for i in MAP3.values())
+    assert all(dev.ch[i]["pw"] == 0 for i in MAP3.values())
+
+
+def assert_power_cut_only_near_zero(dev, tol=5.0):
+    for _, _, chans, _, vmons in power_off_cmds(dev):
+        assert all(abs(vmons[c]) <= tol for c in chans if c in MAP3.values()), (chans, vmons)
+
+
+# ------------------------------------------------------------------ happy path
+def test_full_sequence_with_staging_and_clean_end(make_runner, caplog):
+    hv, runner = make_runner([step(100, 60), step(400, 120)])
+    code = runner.run(YES)
+    dev = hv.device
+    assert code == EXIT_OK
+    assert_safe_end(hv)
+    assert_power_cut_only_near_zero(dev)
+    v0 = [(c[2], c[3]) for c in dev.commands if c[1] == "V0Set"]
+    assert ((0,), 300.0) in v0 and ((1,), 350.0) in v0        # staging checkpoint used when crossing Grid=300
+    assert ((0,), 400.0) in v0 and ((1,), 450.0) in v0
+    assert dev.closed
+
+
+def test_csv_log_written_with_full_rows(make_runner, tmp_path):
+    hv, runner = make_runner([step(100, 30)])
+    runner.run(YES)
+    lines = next((tmp_path / "out").glob("hv_log_*.csv")).read_text().splitlines()
+    assert len(lines) > 5
+    assert "ch0_setV" in lines[0] and "ch5_status" in lines[0]
+    assert all(len(l.split(",")) == len(lines[0].split(",")) for l in lines)
+
+
+def test_resume_from_already_energised_channels(make_runner, vclock):
+    hv = SimulatedDetectorHV(clock=vclock, initial_state={0: (1, 100.0), 1: (1, 150.0), 2: (1, 150.0)})
+    _, runner = make_runner([step(100, 30)], hv=hv, power_on=False)
+    assert runner.run(YES) == EXIT_OK
+    assert_safe_end(hv)
+
+
+# ------------------------------------------------------------------ preflight refusals (HV untouched)
+def no_hv_commands(dev):
+    return not [c for c in dev.commands if c[1] in ("V0Set", "Pw")]
+
+
+def test_refuses_when_unmapped_channel_is_on(make_runner, vclock):
+    hv = SimulatedDetectorHV(clock=vclock, initial_state={3: (1, 0.0)})
+    _, runner = make_runner([step(100, 30)], hv=hv)
+    assert runner.run(YES) == EXIT_REFUSED
+    assert no_hv_commands(hv.device)
+
+
+def test_refuses_when_channels_off_without_power_on_flag(make_runner):
+    hv, runner = make_runner([step(100, 30)], power_on=False)
+    assert runner.run(YES) == EXIT_REFUSED
+    assert no_hv_commands(hv.device)
+
+
+def test_refuses_when_partly_on(make_runner, vclock):
+    hv = SimulatedDetectorHV(clock=vclock, initial_state={0: (1, 0.0)})
+    _, runner = make_runner([step(100, 30)], hv=hv)
+    assert runner.run(YES) == EXIT_REFUSED
+    assert no_hv_commands(hv.device)
+
+
+def test_refuses_when_operator_does_not_confirm(make_runner):
+    hv, runner = make_runner([step(100, 30)])
+    assert runner.run(lambda: False) == EXIT_REFUSED
+    assert no_hv_commands(hv.device)
+
+
+def test_refuses_without_grid_in_map(vclock, log, tmp_path):
+    hv = SimulatedDetectorHV(clock=vclock)
+    runner = StepRunner(hv, {"Anode": 1}, [({"Anode": 50.0}, 1)], tmp_path, clock=vclock, log=log)
+    assert runner.run(YES) == EXIT_REFUSED
+
+
+# ------------------------------------------------------------------ watchdog trips
+def test_overcurrent_during_hold_trips_and_shuts_down(make_runner, vclock, caplog):
+    hv, runner = make_runner([step(100, 600)])
+    vclock.at(200, lambda: hv.device.set_current(1, 8.0))
+    code = runner.run(YES)
+    assert code == EXIT_TRIP
+    assert_safe_end(hv)
+    assert vclock.time() < 260                                  # stopped promptly, did not finish the hold
+
+
+def test_overcurrent_on_unmapped_channel_is_also_caught(make_runner, vclock):
+    hv, runner = make_runner([step(100, 600)])
+    vclock.at(200, lambda: (hv.device.ch[4].update(pw=1), hv.device.set_current(4, 9.0)))
+    assert runner.run(YES) == EXIT_TRIP
+    # unmapped channel 4 was switched on by the "world", not the script: it is not ours to power off,
+    # but the run must still stop and ramp OUR channels down
+    assert all(abs(hv.device.ch[i]["vmon"]) <= 5 for i in MAP3.values())
+
+
+def test_overcurrent_during_ramp(make_runner, vclock):
+    hv, runner = make_runner([step(400, 60)])
+    vclock.at(20, lambda: hv.device.set_current(0, 6.0))
+    assert runner.run(YES) == EXIT_TRIP
+    assert_safe_end(hv)
+
+
+def test_on_trip_ramp_option_uses_controlled_rampdown(make_runner, vclock):
+    hv, runner = make_runner([step(100, 600)], on_trip="ramp")
+    vclock.at(200, lambda: hv.device.set_current(1, 8.0))
+    assert runner.run(YES) == EXIT_TRIP
+    assert_safe_end(hv)
+    assert_power_cut_only_near_zero(hv.device)
+
+
+def test_crate_side_trip_channel_off_is_detected(make_runner, vclock):
+    # hold_v_tol is huge so ONLY the "unexpectedly OFF" check can catch this
+    hv, runner = make_runner([step(100, 600)], hold_v_tol=1e9)
+    vclock.at(200, lambda: hv.device.ch[1].update(pw=0))
+    assert runner.run(YES) == EXIT_TRIP
+    assert vclock.time() < 260
+    assert all(abs(hv.device.ch[i]["vmon"]) <= 5 for i in MAP3.values())
+
+
+def test_voltage_drift_during_hold_trips(make_runner, vclock):
+    # setpoint silently changed on the crate: Pw stays 1, currents are fine, only the drift check sees it
+    hv, runner = make_runner([step(100, 600)])
+    vclock.at(200, lambda: hv.device.ch[0].update(v0set=10.0))
+    assert runner.run(YES) == EXIT_TRIP
+    assert vclock.time() < 300
+    assert_safe_end(hv)
+
+
+# ------------------------------------------------------------------ aborts
+def test_operator_abort_ramps_down_before_cutting_power(make_runner, vclock):
+    hv, runner = make_runner([step(300, 600)])
+    vclock.at(200, lambda: runner.request_abort("test SIGINT"))
+    code = runner.run(YES)
+    assert code == EXIT_ABORTED
+    assert_safe_end(hv)
+    assert_power_cut_only_near_zero(hv.device)
+    assert vclock.time() < 300
+
+
+def test_settle_timeout_aborts_safely(make_runner, vclock):
+    hv, runner = make_runner([step(100, 60)])
+    vclock.at(0.5, lambda: hv.device.frozen.add(0))               # Grid never leaves 0 V
+    code = runner.run(YES)
+    assert code == EXIT_ABORTED
+    assert_safe_end(hv)
+
+
+def test_kill_mode_crate_still_ends_safe(make_runner, vclock):
+    hv = SimulatedDetectorHV(clock=vclock, pdwn="kill")
+    _, runner = make_runner([step(100, 30)], hv=hv)
+    assert runner.run(YES) == EXIT_OK
+    assert_safe_end(hv)
+
+
+# ------------------------------------------------------------------ comms loss / cannot verify
+def test_comms_loss_reports_unsafe_and_does_not_raise(make_runner, vclock, caplog):
+    hv, runner = make_runner([step(100, 600)])
+    vclock.at(200, lambda: setattr(hv.device, "comms_down", True))
+    with caplog.at_level("INFO", logger="hv_steps_test"):
+        code = runner.run(YES)
+    assert code == EXIT_UNSAFE
+    assert "LOST COMMUNICATION" in caplog.text
+
+
+def test_transient_read_failures_are_tolerated(make_runner, vclock):
+    hv, runner = make_runner([step(100, 60)])
+    vclock.at(100, lambda: setattr(hv.device, "comms_down", True))
+    vclock.at(101.5, lambda: setattr(hv.device, "comms_down", False))
+    assert runner.run(YES) == EXIT_OK
+
+
+def test_unreachable_zero_reports_unsafe(make_runner, vclock):
+    hv, runner = make_runner([step(100, 600)])
+    vclock.at(200, lambda: (hv.device.frozen.add(0), runner.request_abort("test")))   # Grid stuck at 100 V
+    assert runner.run(YES) == EXIT_UNSAFE
+
+
+# ------------------------------------------------------------------ DAQ subprocess (real clock, fast sim crate)
+@pytest.fixture
+def real_runner(log, tmp_path):
+    (tmp_path / "out").mkdir(exist_ok=True)
+
+    def factory(daq_code, hold=1.0, **kw):
+        hv = SimulatedDetectorHV(clock=RealClock(), ramp_rate=1e6)
+        cmd = shlex.join([sys.executable, "-c", daq_code, "{outdir}/args.txt", "{step}", "{duration}", "{grid}"])
+        kw.setdefault("daq_grace_s", 1.0)
+        runner = StepRunner(hv, MAP3, [step(100, hold)], tmp_path / "out", clock=RealClock(), log=log,
+                            settle_s=0.1, poll_s=0.05, daq_cmd=cmd, power_on=True, **kw)
+        return hv, runner
+    return factory
+
+
+WRITE_ARGS = "import sys; open(sys.argv[1],'w').write(' '.join(sys.argv[2:]))"
+
+
+def test_daq_receives_placeholders_and_success_continues(real_runner, tmp_path):
+    hv, runner = real_runner(WRITE_ARGS)
+    assert runner.run(YES) == EXIT_OK
+    assert (tmp_path / "out/step_01/args.txt").read_text() == "1 1 100"
+    assert_safe_end(hv)
+
+
+def test_daq_failure_aborts_and_ramps_down(real_runner):
+    hv, runner = real_runner("import sys; sys.exit(3)")
+    assert runner.run(YES) == EXIT_ABORTED
+    assert_safe_end(hv)
+
+
+def test_daq_overrun_is_killed(real_runner):
+    hv, runner = real_runner("import time; time.sleep(60)", hold=0.3, daq_grace_s=0.3)
+    assert runner.run(YES) == EXIT_ABORTED
+    assert_safe_end(hv)
+
+
+def test_overcurrent_kills_running_daq(real_runner):
+    hv, runner = real_runner("import time; time.sleep(60)", hold=30, daq_grace_s=30)
+    threading.Timer(1.0, lambda: hv.device.set_current(1, 9.0)).start()
+    assert runner.run(YES) == EXIT_TRIP
+    assert_safe_end(hv)
+
+
+def test_build_daq_argv():
+    assert build_daq_argv("daq.py --t {duration} --s {step}", duration="5", step=2) == ["daq.py", "--t", "5", "--s", "2"]
+    with pytest.raises(ValueError, match="unknown placeholder"):
+        build_daq_argv("daq.py {nope}", step=1)
+
+
+# ------------------------------------------------------------------ electrode ordering rule
+from backend.safety_rules import ordering_violations
+
+
+def record_vmon(monkeypatch):
+    seen = []
+    orig = SimulatedCaenDevice.get_ch_param
+
+    def spy(self, slot, channels, param):
+        out = orig(self, slot, channels, param)
+        if param == "VMon":
+            seen.append({"Grid": out[0], "Anode": out[1], "Cathode": out[2]})
+        return out
+    monkeypatch.setattr(SimulatedCaenDevice, "get_ch_param", spy)
+    return seen
+
+
+def test_rule_holds_on_every_measurement_of_a_whole_run(make_runner, monkeypatch):
+    seen = record_vmon(monkeypatch)
+    hv, runner = make_runner([step(300, 60), step(150, 60), step(500, 60)])
+    assert runner.run(YES) == EXIT_OK
+    assert len(seen) > 100
+    assert [s for s in seen if ordering_violations(s, 20.0, tol=0.5, floor=0.0)] == []
+    assert max(s["Grid"] for s in seen) >= 500
+
+
+def test_anode_and_cathode_lead_the_grid_when_ramping_up(make_runner):
+    hv, runner = make_runner([step(300, 30)])
+    assert runner.run(YES) == EXIT_OK
+    nonzero = [(c[2][0], c[3]) for c in hv.device.commands if c[1] == "V0Set" and c[3] > 0]
+    assert nonzero[:2] == [(1, 50.0), (2, 50.0)] or nonzero[:2] == [(2, 50.0), (1, 50.0)]   # lead first, Grid still 0
+    assert nonzero.index((1, 350.0)) < nonzero.index((0, 300.0))                          # leaders set before Grid rises
+    assert nonzero.index((0, 300.0)) < nonzero.index((2, 400.0))                          # final Cathode ramp after Grid arrived
+
+
+def test_measured_voltage_breaking_the_rule_trips_even_when_setpoints_look_fine(make_runner, vclock, caplog):
+    hv, runner = make_runner([step(100, 600)], hold_v_tol=1e9)     # drift check off: only the ordering check can see this
+    vclock.at(200, lambda: hv.device.ch[1].update(vmon=hv.device.ch[0]["vmon"] - 20))
+    with caplog.at_level("INFO", logger="hv_steps_test"):
+        assert runner.run(YES) == EXIT_TRIP
+    assert "MEASURED" in caplog.text
+    assert vclock.time() < 260
+
+
+def test_setpoint_change_on_the_crate_breaking_the_rule_trips(make_runner, vclock, caplog):
+    hv, runner = make_runner([step(100, 600)], hold_v_tol=1e9)
+    vclock.at(200, lambda: hv.device.ch[1].update(v0set=110.0))    # Anode only 10 V above Grid
+    with caplog.at_level("INFO", logger="hv_steps_test"):
+        assert runner.run(YES) == EXIT_TRIP
+    assert "SET values" in caplog.text
+
+
+def test_refuses_to_start_from_channels_already_on_in_a_rule_breaking_state(make_runner, vclock):
+    hv = SimulatedDetectorHV(clock=vclock, initial_state={0: (1, 325.0), 1: (1, 325.0), 2: (1, 375.0)})
+    _, runner = make_runner([step(400, 30)], hv=hv, power_on=False)
+    assert runner.run(YES) == EXIT_REFUSED
+    assert no_hv_commands(hv.device)
+
+
+@pytest.mark.parametrize("bad_step", [
+    ({"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0}, 10),   # cathode not above anode
+    ({"Grid": 300.0, "Anode": 315.0, "Cathode": 500.0}, 10),   # anode < grid + 20
+    ({"Grid": 0.0, "Anode": 0.0, "Cathode": 0.0}, 10),
+])
+def test_runner_rejects_rule_breaking_steps_at_construction(vclock, log, tmp_path, bad_step):
+    with pytest.raises(ValueError, match="step 1"):
+        StepRunner(SimulatedDetectorHV(clock=vclock), MAP3, [bad_step], tmp_path, clock=vclock, log=log)
+
+
+def test_runner_rejects_offset_below_min_delta(vclock, log, tmp_path):
+    with pytest.raises(ValueError, match="offset"):
+        StepRunner(SimulatedDetectorHV(clock=vclock), MAP3, [step(100, 10)], tmp_path, clock=vclock, log=log,
+                   stage_offset=10.0)
+
+
+# ------------------------------------------------------------------ DAQ data files logged against the HV step
+def read_step_csv(tmp_path):
+    import csv
+    return list(csv.DictReader(open(tmp_path / "out" / "step_data_files.csv")))
+
+
+def test_data_files_reported_by_the_daq_are_logged_against_the_step(real_runner, tmp_path):
+    hv, runner = real_runner("print('DAQ_OUTPUT: /x/a.h5'); print('DAQ_OUTPUT: /x/b.h5'); print('noise')")
+    assert runner.run(YES) == EXIT_OK
+    (row,) = read_step_csv(tmp_path)
+    assert row["step"] == "1" and row["daq_returncode"] == "0" and row["hold_s"] == "1"
+    assert row["data_files"] == "/x/a.h5;/x/b.h5"
+    assert "Grid=100" in row["targets"] and "Cathode=200" in row["targets"]
+    assert row["start"] <= row["end"] and len(row["start"]) == 19          # hv_log Timestamp format
+
+
+def test_step_record_is_written_even_when_the_daq_fails(real_runner, tmp_path):
+    hv, runner = real_runner("print('DAQ_OUTPUT: /x/partial.h5'); import sys; sys.exit(3)")
+    assert runner.run(YES) == EXIT_ABORTED
+    (row,) = read_step_csv(tmp_path)
+    assert row["daq_returncode"] == "3" and row["data_files"] == "/x/partial.h5"
+
+
+def test_step_record_is_written_when_a_trip_stops_the_daq(real_runner, tmp_path):
+    hv, runner = real_runner("import time; time.sleep(60)", hold=30, daq_grace_s=30)
+    threading.Timer(1.0, lambda: hv.device.set_current(1, 9.0)).start()
+    assert runner.run(YES) == EXIT_TRIP
+    (row,) = read_step_csv(tmp_path)
+    assert row["daq_returncode"] not in ("", "0") and row["data_files"] == ""

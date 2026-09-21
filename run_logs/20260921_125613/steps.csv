@@ -1,0 +1,6 @@
+# EXAMPLE ONLY - not a validated operating point.
+# Row format: ch,V,ch,V,...,hold_s   (physical channel numbers; hold in seconds)
+# Every channel in the DAQ tab's channel map must appear in every step.
+# Default 3-channel map: Grid=Ch0, Anode=Ch1, Cathode=Ch2
+0,300,1,350,2,350,600
+0,325,1,375,2,375,1800

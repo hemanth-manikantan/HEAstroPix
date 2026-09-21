@@ -1,0 +1,10 @@
+13:00:53 INFO     outputs in run_logs/20260921_130053
+13:00:54 INFO     crate state:
+13:00:54 INFO       Ch0 (Grid): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 INFO       Ch1 (Anode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 INFO       Ch2 (Cathode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 INFO       Ch3 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 INFO       Ch4 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 INFO       Ch5 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:00:54 ERROR    REFUSED: mapped channels are OFF; pass --power-on to let the script power them on at 0 V
+13:00:54 INFO     exit code 2

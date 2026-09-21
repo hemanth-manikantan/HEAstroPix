@@ -1,0 +1,46 @@
+13:57:28 INFO     outputs in run_logs/20260921_135728
+13:57:28 INFO     crate state:
+13:57:28 INFO       Ch0 (Grid): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:28 INFO       Ch1 (Anode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:28 INFO       Ch2 (Cathode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:28 INFO       Ch3 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:28 INFO       Ch4 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:28 INFO       Ch5 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:57:36 INFO     powering ON mapped channels (0 V first)
+13:57:38 INFO     === step 1/2 ===
+13:57:38 INFO     step 1 checkpoint 1/3: ramping to Grid=0, Anode=50, Cathode=50 (max jump 50 V, timeout 42 s)
+13:57:39 INFO     status: Grid 0.0 V/0.000 uA, Anode 0.0 V/0.000 uA, Cathode 0.0 V/0.000 uA
+13:57:51 INFO     step 1 checkpoint 1/3: settled within +/-10 V
+13:57:51 INFO     step 1 checkpoint 2/3: ramping to Grid=300, Anode=350, Cathode=350 (max jump 307 V, timeout 81 s)
+13:58:09 INFO     status: Grid 159.0 V/0.000 uA, Anode 211.0 V/0.000 uA, Cathode 211.0 V/0.000 uA
+13:58:28 INFO     step 1 checkpoint 2/3: settled within +/-10 V
+13:58:28 INFO     step 1 checkpoint 3/3: ramping to Grid=300, Anode=350, Cathode=500 (max jump 154 V, timeout 58 s)
+13:58:39 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 438.0 V/0.000 uA
+13:58:49 INFO     step 1 checkpoint 3/3: settled within +/-10 V
+13:58:49 INFO     step 1: holding 600 s (no DAQ command)
+13:59:09 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+13:59:39 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:00:10 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:00:40 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:01:10 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:01:40 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:02:10 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:02:41 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:03:11 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:03:41 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:04:11 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:04:41 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:05:12 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:05:42 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:06:12 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:06:42 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:07:12 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:07:43 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:08:13 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 497.0 V/0.000 uA
+14:08:16 WARNING  abort requested: SIGINT (ramp-down starts at the next poll)
+14:08:17 WARNING  ABORT: SIGINT
+14:08:17 WARNING  RAMP-DOWN (controlled to 0 V): SIGINT
+14:08:43 INFO     status: Grid 54.0 V/0.000 uA, Anode 102.0 V/0.000 uA, Cathode 257.0 V/0.000 uA
+14:09:12 INFO     0 V verified; powering OFF mapped channels
+14:09:13 INFO     safe state reached
+14:09:13 INFO     exit code 1

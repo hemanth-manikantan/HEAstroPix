@@ -1,0 +1,20 @@
+14:10:44 INFO     outputs in run_logs/20260921_141044
+14:10:45 INFO     crate state:
+14:10:45 INFO       Ch0 (Grid): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:45 INFO       Ch1 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:45 INFO       Ch2 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:45 INFO       Ch3 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:45 INFO       Ch4 (Anode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:45 INFO       Ch5 (Cathode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:53 INFO     powering ON mapped channels (0 V first)
+14:10:54 INFO     === step 1/2 ===
+14:10:54 INFO     step 1 checkpoint 1/3: ramping to Grid=0, Anode=50, Cathode=50 (max jump 50 V, timeout 42 s)
+14:10:55 INFO     status: Grid 0.0 V/0.000 uA, Anode 0.0 V/0.000 uA, Cathode 0.0 V/0.000 uA
+14:11:07 INFO     step 1 checkpoint 1/3: settled within +/-10 V
+14:11:07 INFO     step 1 checkpoint 2/3: ramping to Grid=300, Anode=350, Cathode=350 (max jump 307 V, timeout 81 s)
+14:11:15 ERROR    SAFETY TRIP: electrode rule broken by MEASURED voltages: Cathode (99 V) must be at least Anode (111 V)
+14:11:15 WARNING  RAMP-DOWN (backend shutdown()): electrode rule broken by MEASURED voltages: Cathode (99 V) must be at least Anode (111 V)
+14:11:26 INFO     status: Grid 9.0 V/0.000 uA, Anode 43.0 V/0.000 uA, Cathode 43.0 V/0.000 uA
+14:11:33 INFO     0 V verified; powering OFF mapped channels
+14:11:34 INFO     safe state reached
+14:11:34 INFO     exit code 3

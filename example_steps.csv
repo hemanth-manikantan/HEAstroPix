@@ -1,0 +1,7 @@
+# EXAMPLE ONLY - not a validated operating point.
+# Row format: ch,V,ch,V,...,hold_s   (physical channel numbers; hold in seconds)
+# Every channel in --channel-map must appear in every step.
+# Rule: Anode >= Grid + 20 V, Cathode > Anode (checked at load time and during the run).
+# Example channel map: Grid=0, Anode=4, Cathode=5
+0,300,4,350,5,500,600
+0,325,4,375,5,600,1800

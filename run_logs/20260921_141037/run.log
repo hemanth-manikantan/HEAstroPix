@@ -1,0 +1,10 @@
+14:10:37 INFO     outputs in run_logs/20260921_141037
+14:10:38 INFO     crate state:
+14:10:38 INFO       Ch0 (Grid): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:38 INFO       Ch1 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:38 INFO       Ch2 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:38 INFO       Ch3 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:38 INFO       Ch4 (Anode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:38 INFO       Ch5 (Cathode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+14:10:43 ERROR    REFUSED: not confirmed by the operator
+14:10:43 INFO     exit code 2

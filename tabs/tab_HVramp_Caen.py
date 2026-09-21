@@ -147,6 +147,20 @@ def HVramp_Caen_tab():
             st.rerun()
 
         st.divider()
+
+        # --- Safety Settings ---
+        st.markdown("### Safety Watchdog Settings")
+        max_curr_limit = st.number_input(
+            "Max Current Limit (μA)",
+            min_value=0.1,
+            max_value=100.0,
+            value=getattr(hv, "max_current_limit", 5.0),
+            step=0.5,
+            help="Emergency shutdown triggers if active current exceeds this value."
+        )
+        hv.max_current_limit = max_curr_limit
+
+        st.divider()
         
         ramp_disabled = not is_powered or is_any_job_running
 

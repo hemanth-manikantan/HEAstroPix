@@ -1,0 +1,25 @@
+13:02:56 INFO     outputs in run_logs/20260921_130256
+13:02:57 INFO     crate state:
+13:02:57 INFO       Ch0 (Grid): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:02:57 INFO       Ch1 (Anode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:02:57 INFO       Ch2 (Cathode): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:02:57 INFO       Ch3 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:02:57 INFO       Ch4 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:02:57 INFO       Ch5 (unmapped): Pw=0 VMon=0.0 V IMon=0.000 uA I0Set=100.0 uA
+13:03:01 INFO     powering ON mapped channels (0 V first)
+13:03:02 INFO     === step 1/2 ===
+13:03:02 INFO     step 1 checkpoint 1/1: ramping to Grid=300, Anode=350, Cathode=350 (max jump 350 V, timeout 88 s)
+13:03:03 INFO     status: Grid 0.0 V/0.000 uA, Anode 0.0 V/0.000 uA, Cathode 0.0 V/0.000 uA
+13:03:33 INFO     status: Grid 289.0 V/0.000 uA, Anode 292.0 V/0.000 uA, Cathode 289.0 V/0.000 uA
+13:03:44 INFO     step 1 checkpoint 1/1: settled within +/-10 V
+13:03:44 INFO     step 1: holding 600 s (no DAQ command)
+13:04:04 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 346.0 V/0.000 uA
+13:04:34 INFO     status: Grid 295.0 V/0.000 uA, Anode 345.0 V/0.000 uA, Cathode 346.0 V/0.000 uA
+13:05:02 WARNING  abort requested: SIGINT (ramp-down starts at the next poll)
+13:05:02 WARNING  ABORT: SIGINT
+13:05:02 WARNING  RAMP-DOWN (controlled to 0 V): SIGINT
+13:05:04 INFO     status: Grid 285.0 V/0.000 uA, Anode 337.0 V/0.000 uA, Cathode 337.0 V/0.000 uA
+13:05:34 INFO     status: Grid 8.0 V/0.000 uA, Anode 40.0 V/0.000 uA, Cathode 39.0 V/0.000 uA
+13:05:41 INFO     0 V verified; powering OFF mapped channels
+13:05:42 INFO     safe state reached
+13:05:42 INFO     exit code 1

@@ -2,12 +2,16 @@ import time
 import csv
 import pandas as pd
 from datetime import datetime
-from caen_libs import caenhvwrapper as hv
+from backend.safety_rules import validate_50v_delta, validate_current_limits
+
+def _caen():
+    from caen_libs import caenhvwrapper
+    return caenhvwrapper
 
 class DetectorHV:
     def __init__(self, address, user="admin", password="admin"):
-        self.system_type = hv.SystemType.SY5527
-        self.link_type = hv.LinkType.TCPIP
+        self.system_type = None  # resolved in connect() so caen_libs is only needed for real hardware
+        self.link_type = None
         self.address = address
         self.user = user
         self.password = password
@@ -43,10 +47,16 @@ class DetectorHV:
             name: {"V": 0.0, "I": 0.0, "PW": 0, "VSET": 0.0} 
             for name in self.channels
         }
+        self.last_read_time = 0.0 # Network throttle timer
+        self.max_current_limit = 5.0 # Max safe current in uA
+
 
     def connect(self):
         try:
-            self.device = hv.Device.open(self.system_type, self.link_type, 
+            hv = _caen()
+            self.system_type = hv.SystemType.SY5527
+            self.link_type = hv.LinkType.TCPIP
+            self.device = hv.Device.open(self.system_type, self.link_type,
                                         self.address, self.user, self.password)
             # We still initialize safety limits (Ramp rates) as a precaution
             self.initialize_safety_limits(rate=10.0)
@@ -87,10 +97,12 @@ class DetectorHV:
     #         self.device.set_ch_param(self.slot, unique_channels, self.PARAM_PW, state)
     #         print(f"Hardware Command: Power {state} on channels {unique_channels}")
 
+    # 
+    
+    # Replace for loop for speed
     def set_power(self, state: int, active_channel_names=None):
         """
         Turns Power ON (1) or OFF (0) for a specific list of channels.
-        If no list is provided, it defaults to all mapped channels.
         """
         if active_channel_names is None:
             active_channel_names = list(self.channels.keys())
@@ -98,11 +110,12 @@ class DetectorHV:
         unique_indices = list(set([self.channels[name] for name in active_channel_names]))
         
         if state == 1:
-            # HARDWARE SAFETY CHECK
-            # Only force 0V if the physical channel is actually OFF right now
+            # 🚀 SPEED FIX: Fetch all power statuses in ONE network call instead of looping
+            all_pw_stats = self.device.get_ch_param(self.slot, [0, 1, 2, 3, 4, 5], self.PARAM_PW)
+            
             for name in active_channel_names:
                 ch_idx = self.channels[name]
-                is_on = self.device.get_ch_param(self.slot, [ch_idx], self.PARAM_PW)[0]
+                is_on = all_pw_stats[ch_idx] # Instantly read from local memory
                 
                 if not is_on:
                     self.set_voltage(name, 0.0)
@@ -112,18 +125,19 @@ class DetectorHV:
             self.device.set_ch_param(self.slot, unique_indices, self.PARAM_PW, state)
             print(f"Hardware Command: Power {state} on channels {unique_indices}")
         
-        # Update local UI cache
         for name in active_channel_names:
             if name in self.live_data:
                 self.live_data[name]["PW"] = state
-                # Let the next read_all() cycle update the VSET to avoid caching incorrect values
     
     def initialize_safety_limits(self, rate=10.0):
         for idx in self.channels.values():
             self.device.set_ch_param(self.slot, [idx], self.PARAM_RUP, float(rate))
             self.device.set_ch_param(self.slot, [idx], self.PARAM_RDWN, float(rate))
 
-    def read_all(self):
+    def read_all(self, currents_only=False):
+        if time.time() - self.last_read_time < 0.5:# instantly return the cached data to prevent UI freezing, if we just read the hardware less than 0.5s ago!
+            return
+        self.last_read_time = time.time()
         now = datetime.now()
         elapsed = round(time.time() - self.start_time, 2)
         current_data = {"Timestamp": now.strftime("%Y-%m-%d %H:%M:%S"), "Elapsed": elapsed}
@@ -141,29 +155,46 @@ class DetectorHV:
         all_ch = [0, 1, 2, 3, 4, 5]
         
         try:
-            # We pass the entire list of channels at once.
-            # The library returns a list of 6 values back.
-            v_sets = self.device.get_ch_param(self.slot, all_ch, self.PARAM_VSET)
-            v_mons = self.device.get_ch_param(self.slot, all_ch, self.PARAM_VMON)
-            i_sets = self.device.get_ch_param(self.slot, all_ch, self.PARAM_ISET)
-            i_mons = self.device.get_ch_param(self.slot, all_ch, self.PARAM_IMON)
-            pw_stats = self.device.get_ch_param(self.slot, all_ch, self.PARAM_PW)
-            
-            # 3. UNPACK THE BATCH DATA
-            for idx in all_ch:
-                # Format CSV Columns
-                current_data[f"ch{idx}_setV"] = v_sets[idx]
-                current_data[f"ch{idx}_monV"] = v_mons[idx]
-                current_data[f"ch{idx}_setI"] = i_sets[idx]
-                current_data[f"ch{idx}_monI"] = i_mons[idx]
-                current_data[f"ch{idx}_status"] = int(pw_stats[idx])
+            if currents_only:
+                # Fast path: Only query current and power status
+                i_mons = self.device.get_ch_param(self.slot, all_ch, self.PARAM_IMON)
+                pw_stats = self.device.get_ch_param(self.slot, all_ch, self.PARAM_PW)
+                
+                # Unpack batch data
+                for idx in all_ch:
+                    current_data[f"ch{idx}_monI"] = i_mons[idx]
+                    current_data[f"ch{idx}_status"] = int(pw_stats[idx])
+                    
+                    for name, mapped_idx in self.channels.items():
+                        if idx == mapped_idx:
+                            self.live_data[name]["I"] = i_mons[idx]
+                            self.live_data[name]["PW"] = pw_stats[idx]
+                            self.data_history_i[name].append(i_mons[idx])
+                            
+                            # Balances array lengths by using last known physical voltage
+                            last_v = self.live_data[name].get("V", 0.0)
+                            self.data_history_v[name].append(last_v)
+            else:
+                # Full read: We pass the entire list of channels at once.
+                v_sets = self.device.get_ch_param(self.slot, all_ch, self.PARAM_VSET)
+                v_mons = self.device.get_ch_param(self.slot, all_ch, self.PARAM_VMON)
+                i_sets = self.device.get_ch_param(self.slot, all_ch, self.PARAM_ISET)
+                i_mons = self.device.get_ch_param(self.slot, all_ch, self.PARAM_IMON)
+                pw_stats = self.device.get_ch_param(self.slot, all_ch, self.PARAM_PW)
+                
+                # Unpack the batch data
+                for idx in all_ch:
+                    current_data[f"ch{idx}_setV"] = v_sets[idx]
+                    current_data[f"ch{idx}_monV"] = v_mons[idx]
+                    current_data[f"ch{idx}_setI"] = i_sets[idx]
+                    current_data[f"ch{idx}_monI"] = i_mons[idx]
+                    current_data[f"ch{idx}_status"] = int(pw_stats[idx])
 
-                # Update UI cache only for mapped names
-                for name, mapped_idx in self.channels.items():
-                    if idx == mapped_idx:
-                        self.live_data[name] = {"V": v_mons[idx], "I": i_mons[idx], "PW": pw_stats[idx], "VSET": v_sets[idx]}
-                        self.data_history_v[name].append(v_mons[idx])
-                        self.data_history_i[name].append(i_mons[idx])
+                    for name, mapped_idx in self.channels.items():
+                        if idx == mapped_idx:
+                            self.live_data[name] = {"V": v_mons[idx], "I": i_mons[idx], "PW": pw_stats[idx], "VSET": v_sets[idx]}
+                            self.data_history_v[name].append(v_mons[idx])
+                            self.data_history_i[name].append(i_mons[idx])
             
             # 4. APPEND TIMESTAMP & SAVE
             self.timestamps.append(elapsed)
@@ -171,7 +202,6 @@ class DetectorHV:
             
         except Exception as e:
             print(f"Batch Network Read Error: {e}")
-            # If a network packet drops, we safely skip this cycle to prevent unequal arrays
             pass
         
         # 5. SLIDING WINDOW MEMORY MANAGEMENT
@@ -512,7 +542,6 @@ def run_100V_test(hv_unit):
 
 def execute_daq_sequence_step(hv_unit, trajectory, hold_time=15.0):
     """
-    Added 20260618
     Executes a multi-checkpoint trajectory provided by the Safety Engine.
     trajectory: List of dictionaries, e.g., [{'Grid': 300, 'Anode': 350}, {'Grid': 1460, 'Anode': 460}]
     """
@@ -544,6 +573,16 @@ def execute_daq_sequence_step(hv_unit, trajectory, hold_time=15.0):
         
         for _ in range(chunks):
             if getattr(hv_unit, 'abort_sequence', False): return False
+            
+            hv_unit.read_all(currents_only=True) # Force a fast hardware read of currents
+            
+            # THE SAFETY WATCHDOG: Only monitor currents during ramp
+            if not validate_current_limits(hv_unit.live_data, hv_unit.max_current_limit):
+                hv_unit.sequence_status = "🚨 SAFETY TRIP: Overcurrent Detected!"
+                hv_unit.abort_sequence = True
+                hv_unit.shutdown() # Emergency shutdown
+                return False
+                
             time.sleep(1)
             elapsed_time += 1
             if total_time > 0:
@@ -551,6 +590,16 @@ def execute_daq_sequence_step(hv_unit, trajectory, hold_time=15.0):
             
         if remainder > 0:
             if getattr(hv_unit, 'abort_sequence', False): return False
+
+            hv_unit.read_all(currents_only=True) # Force a fast hardware read of currents
+            
+            # THE SAFETY WATCHDOG: Final check for the remainder interval
+            if not validate_current_limits(hv_unit.live_data, hv_unit.max_current_limit):
+                hv_unit.sequence_status = "🚨 SAFETY TRIP: Overcurrent Detected!"
+                hv_unit.abort_sequence = True
+                hv_unit.shutdown() # Emergency shutdown
+                return False
+                
             time.sleep(remainder)
             elapsed_time += remainder
             if total_time > 0:
@@ -559,9 +608,23 @@ def execute_daq_sequence_step(hv_unit, trajectory, hold_time=15.0):
 
     # --- EXECUTE THE TRAJECTORY ---
     for i, step_targets in enumerate(trajectory):
+        # 1. Pre-command validation (Set-Value check of targets)
+        temp_data = {}
+        for name, target in step_targets.items():
+            temp_data[name] = {
+                "VSET": target,
+                "PW": hv_unit.live_data.get(name, {}).get("PW", 1) # Default to ON if not cached
+            }
+        
+        if not validate_50v_delta(temp_data):
+            hv_unit.sequence_status = "🚨 SAFETY TRIP: Trajectory step violates 50V rule!"
+            hv_unit.abort_sequence = True
+            hv_unit.shutdown()
+            break
+
         hv_unit.sequence_status = f"Executing safe checkpoint {i+1}/{len(trajectory)}..."
         
-        # 1. Calculate the max time needed for the biggest voltage jump in this specific step
+        # Calculate the max time needed for the biggest voltage jump in this specific step
         max_v_jump = 0.0
         for name, target in step_targets.items():
             current_v = hv_unit.live_data.get(name, {}).get("V", 0.0)
@@ -573,17 +636,155 @@ def execute_daq_sequence_step(hv_unit, trajectory, hold_time=15.0):
             
         wait_time = (max_v_jump / ramp_rate) + settle_buffer
         
-        # 2. Wait for the ramp to finish
+        # 2. Wait for the ramp to finish using the safety watchdog
         if not smart_sleep_watchdog(wait_time):
             break
             
     # --- COMPLETION CHECK ---
     if getattr(hv_unit, 'abort_sequence', False):
-        hv_unit.sequence_status = "🚨 ABORTED: Ramping to safe 0V state..."
-        for name in trajectory[-1].keys():
-            hv_unit.set_voltage(name, 0.0)
+        # Only overwrite the status if it wasn't a specific Safety Trip
+        if "SAFETY TRIP" not in getattr(hv_unit, 'sequence_status', ''):
+            hv_unit.sequence_status = "🚨 ABORTED: Ramping to safe 0V state..."
+            hv_unit.shutdown()
         return "Aborted"
         
     hv_unit.sequence_status = "Voltages Settled. Waiting for DAQ trigger."
+    hv_unit.sequence_progress = 100
+    return "Complete"
+
+
+def run_safe_step_sequence(hv_unit, direction):
+    """
+    Sequence to ramp up to the safe step or down to zero in synchronized 50V steps.
+    Only supported for 3-Channel setup: Cathode, Anode, Grid.
+    """
+    if "Grid" not in hv_unit.channels or "Anode" not in hv_unit.channels or "Cathode" not in hv_unit.channels:
+        hv_unit.sequence_status = "🚨 ERROR: Safe Step Sequence requires 3-Channel configuration!"
+        return "Failed"
+        
+    ramp_rate = 10.0 # V/s
+    settle_buffer = 5.0 # Seconds to settle at intermediate steps
+    
+    hv_unit.abort_sequence = False
+    hv_unit.sequence_progress = 0
+    
+    # 1. Define the steps
+    if direction == "up":
+        steps = [
+            {"Grid": 0.0, "Anode": 50.0, "Cathode": 50.0},
+            {"Grid": 50.0, "Anode": 100.0, "Cathode": 100.0},
+            {"Grid": 100.0, "Anode": 150.0, "Cathode": 150.0},
+            {"Grid": 150.0, "Anode": 200.0, "Cathode": 200.0},
+            {"Grid": 200.0, "Anode": 250.0, "Cathode": 250.0},
+            {"Grid": 250.0, "Anode": 300.0, "Cathode": 300.0},
+            {"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0},
+            {"Grid": 325.0, "Anode": 375.0, "Cathode": 375.0}
+        ]
+    else:
+        steps = [
+            {"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0},
+            {"Grid": 250.0, "Anode": 300.0, "Cathode": 300.0},
+            {"Grid": 200.0, "Anode": 250.0, "Cathode": 250.0},
+            {"Grid": 150.0, "Anode": 200.0, "Cathode": 200.0},
+            {"Grid": 100.0, "Anode": 150.0, "Cathode": 150.0},
+            {"Grid": 50.0, "Anode": 100.0, "Cathode": 100.0},
+            {"Grid": 0.0, "Anode": 50.0, "Cathode": 50.0},
+            {"Grid": 0.0, "Anode": 0.0, "Cathode": 0.0}
+        ]
+        
+    total_steps = len(steps)
+    total_time = total_steps * (50.0 / ramp_rate + settle_buffer)
+    elapsed_time = 0.0
+    
+    # Fast watchdog sleep function
+    def smart_sleep(duration):
+        nonlocal elapsed_time
+        chunks = int(duration)
+        remainder = duration - chunks
+        
+        for _ in range(chunks):
+            if getattr(hv_unit, 'abort_sequence', False): return False
+            
+            # Fast read of currents
+            hv_unit.read_all(currents_only=True)
+            if not validate_current_limits(hv_unit.live_data, hv_unit.max_current_limit):
+                hv_unit.sequence_status = "🚨 SAFETY TRIP: Overcurrent Detected!"
+                hv_unit.abort_sequence = True
+                hv_unit.shutdown()
+                return False
+                
+            time.sleep(1)
+            elapsed_time += 1
+            hv_unit.sequence_progress = min(int((elapsed_time / total_time) * 100), 100)
+            
+        if remainder > 0:
+            if getattr(hv_unit, 'abort_sequence', False): return False
+            hv_unit.read_all(currents_only=True)
+            if not validate_current_limits(hv_unit.live_data, hv_unit.max_current_limit):
+                hv_unit.sequence_status = "🚨 SAFETY TRIP: Overcurrent Detected!"
+                hv_unit.abort_sequence = True
+                hv_unit.shutdown()
+                return False
+            time.sleep(remainder)
+            elapsed_time += remainder
+            hv_unit.sequence_progress = min(int((elapsed_time / total_time) * 100), 100)
+        return True
+
+    # 2. Iterate through steps
+    for idx, step_targets in enumerate(steps):
+        if getattr(hv_unit, 'abort_sequence', False):
+            break
+            
+        hv_unit.sequence_status = f"Safe Ramping: Step {idx + 1}/{total_steps} (Grid={step_targets['Grid']}V)..."
+        
+        # Calculate maximum voltage jump to determine sleep duration
+        max_jump = 0.0
+        for name, target in step_targets.items():
+            current_v = hv_unit.live_data.get(name, {}).get("V", 0.0)
+            jump = abs(target - current_v)
+            if jump > max_jump: max_jump = jump
+            
+            # Send physical voltage command
+            hv_unit.set_voltage(name, target)
+            
+        wait_time = (max_jump / ramp_rate) + settle_buffer
+        
+        # Wait for ramp to finish and stabilize
+        if not smart_sleep(wait_time):
+            break
+            
+        # 3. INTERMEDIATE STEP VERIFICATION (Physical Telemetry Check)
+        hv_unit.read_all(currents_only=False) # Force a full telemetry read
+        
+        grid_mon = hv_unit.live_data["Grid"].get("V", 0.0)
+        anode_mon = hv_unit.live_data["Anode"].get("V", 0.0)
+        cathode_mon = hv_unit.live_data["Cathode"].get("V", 0.0)
+        
+        # Check delta verification: Anode/Cathode must be at least 20V above Grid
+        if step_targets["Anode"] > 0.0 and step_targets["Cathode"] > 0.0:
+            anode_delta = anode_mon - grid_mon
+            cathode_delta = cathode_mon - grid_mon
+            
+            if anode_delta < 20.0 or cathode_delta < 20.0:
+                hv_unit.sequence_status = f"🚨 SAFETY TRIP: Voltage delta violation at Step {idx + 1}! (Anode-Grid={anode_delta:.1f}V, Cathode-Grid={cathode_delta:.1f}V)"
+                hv_unit.abort_sequence = True
+                hv_unit.shutdown()
+                break
+            
+        # Check current verification
+        if not validate_current_limits(hv_unit.live_data, hv_unit.max_current_limit):
+            hv_unit.sequence_status = f"🚨 SAFETY TRIP: Intermediate overcurrent at Step {idx + 1}!"
+            hv_unit.abort_sequence = True
+            hv_unit.shutdown()
+            break
+
+    # 4. Final Completion Check
+    if getattr(hv_unit, 'abort_sequence', False):
+        if "SAFETY TRIP" not in getattr(hv_unit, 'sequence_status', ''):
+            hv_unit.sequence_status = "🚨 ABORTED: Ramping to safe 0V state..."
+            hv_unit.shutdown()
+        return "Aborted"
+        
+    hv_unit.sequence_status = "Safe Step Sequence Finished successfully."
     hv_unit.sequence_progress = 100
     return "Complete"
