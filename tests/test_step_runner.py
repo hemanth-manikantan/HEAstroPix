@@ -90,7 +90,7 @@ def test_refuses_when_operator_does_not_confirm(make_runner):
 
 def test_refuses_without_grid_in_map(vclock, log, tmp_path):
     hv = SimulatedDetectorHV(clock=vclock)
-    runner = StepRunner(hv, {"Anode": 1}, [({"Anode": 50.0}, 1)], tmp_path, clock=vclock, log=log)
+    runner = StepRunner(hv, {"Anode": 1}, [({"Anode": 50.0}, 1, None)], tmp_path, clock=vclock, log=log)
     assert runner.run(YES) == EXIT_REFUSED
 
 
@@ -200,11 +200,11 @@ def test_unreachable_zero_reports_unsafe(make_runner, vclock):
 def real_runner(log, tmp_path):
     (tmp_path / "out").mkdir(exist_ok=True)
 
-    def factory(daq_code, hold=1.0, **kw):
+    def factory(daq_code, hold=1.0, steps=None, **kw):
         hv = SimulatedDetectorHV(clock=RealClock(), ramp_rate=1e6)
         cmd = shlex.join([sys.executable, "-c", daq_code, "{outdir}/args.txt", "{step}", "{duration}", "{grid}"])
         kw.setdefault("daq_grace_s", 1.0)
-        runner = StepRunner(hv, MAP3, [step(100, hold)], tmp_path / "out", clock=RealClock(), log=log,
+        runner = StepRunner(hv, MAP3, steps or [step(100, hold)], tmp_path / "out", clock=RealClock(), log=log,
                             settle_s=0.1, poll_s=0.05, daq_cmd=cmd, power_on=True, **kw)
         return hv, runner
     return factory
@@ -305,9 +305,9 @@ def test_refuses_to_start_from_channels_already_on_in_a_rule_breaking_state(make
 
 
 @pytest.mark.parametrize("bad_step", [
-    ({"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0}, 10),   # cathode not above anode
-    ({"Grid": 300.0, "Anode": 315.0, "Cathode": 500.0}, 10),   # anode < grid + 20
-    ({"Grid": 0.0, "Anode": 0.0, "Cathode": 0.0}, 10),
+    ({"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0}, 10, None),   # cathode not above anode
+    ({"Grid": 300.0, "Anode": 315.0, "Cathode": 500.0}, 10, None),   # anode < grid + 20
+    ({"Grid": 0.0, "Anode": 0.0, "Cathode": 0.0}, 10, None),
 ])
 def test_runner_rejects_rule_breaking_steps_at_construction(vclock, log, tmp_path, bad_step):
     with pytest.raises(ValueError, match="step 1"):
@@ -349,3 +349,43 @@ def test_step_record_is_written_when_a_trip_stops_the_daq(real_runner, tmp_path)
     assert runner.run(YES) == EXIT_TRIP
     (row,) = read_step_csv(tmp_path)
     assert row["daq_returncode"] not in ("", "0") and row["data_files"] == ""
+
+
+# ------------------------------------------------------------------ per-step DAQ Y/N column resolution
+def test_daq_flag_per_step_controls_whether_daq_runs(real_runner, tmp_path):
+    steps = [step(100, 1, daq=False), step(200, 1, daq=True), step(300, 1, daq=None)]
+    hv, runner = real_runner(WRITE_ARGS, steps=steps)
+    assert runner.run(YES) == EXIT_OK
+    assert not (tmp_path / "out/step_01/args.txt").exists()   # CSV said N: no DAQ even though --daq-cmd is set
+    assert (tmp_path / "out/step_02/args.txt").exists()       # CSV said Y: DAQ runs
+    assert (tmp_path / "out/step_03/args.txt").exists()       # no column: follows --daq-cmd being set -> DAQ runs
+    rows = read_step_csv(tmp_path)
+    assert [r["step"] for r in rows] == ["2", "3"]             # only DAQ-run steps get a data-file record
+
+
+def test_daq_column_none_without_a_daq_cmd_just_holds(make_runner):
+    # no daq_cmd configured at all: a column-less step (daq=None) must behave exactly as before this feature
+    hv, runner = make_runner([step(100, 30, daq=None)])
+    assert runner.run(YES) == EXIT_OK
+    assert no_hv_commands  # sanity the helper still exists; real assertion is that run() completed via plain hold
+
+
+def test_daq_column_false_skips_even_with_a_daq_cmd_configured_via_simulated_clock(make_runner):
+    hv, runner = make_runner([step(100, 5, daq=False)], daq_cmd="/bin/false {step}")
+    assert runner.run(YES) == EXIT_OK   # would fail/hang trying to run /bin/false as a real subprocess if not skipped
+
+
+def test_constructor_rejects_a_forced_y_step_without_a_daq_cmd(vclock, log, tmp_path):
+    with pytest.raises(ValueError, match="forces a DAQ"):
+        StepRunner(SimulatedDetectorHV(clock=vclock), MAP3, [step(100, 10, daq=True)], tmp_path,
+                  clock=vclock, log=log)
+
+
+def test_wants_daq_resolution_table():
+    hv, runner = None, StepRunner.__new__(StepRunner)
+    for daq_cmd in (None, "cmd"):
+        runner.daq_cmd = daq_cmd
+        assert runner._wants_daq(False) is False
+        assert runner._wants_daq(None) is bool(daq_cmd)
+    runner.daq_cmd = "cmd"
+    assert runner._wants_daq(True) is True

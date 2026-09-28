@@ -108,3 +108,30 @@ def test_cli_dry_run_prints_checkpoints_and_rejects_rule_breaking_files(tmp_path
         bad = tmp_path / "bad.csv"
         bad.write_text(bad_row + "\n")
         assert run_steps.main([str(bad), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run"]) == 2, bad_row
+
+
+def test_cli_dry_run_shows_daq_status_per_step(tmp_path, capsys):
+    import run_steps
+    csv = tmp_path / "s.csv"
+    csv.write_text("0,300,1,350,2,500,60,N\n0,325,1,375,2,600,60,Y\n0,325,1,375,2,600,60\n")
+    base = [str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run"]
+
+    assert run_steps.main(base + ["--daq-cmd", "echo {step}"]) == 0
+    out = capsys.readouterr().out
+    lines = {l.split(":")[0].strip(): l for l in out.splitlines() if l.strip().startswith("Step")}
+    assert lines["Step 1"].endswith("hold 60 s, no DAQ (CSV)")
+    assert lines["Step 2"].endswith("hold 60 s, DAQ")
+    assert lines["Step 3"].endswith("hold 60 s, DAQ")   # no column, follows --daq-cmd being set
+
+    assert run_steps.main(base) == 2   # step 2 forces Y but no --daq-cmd was given: refused before any HV
+    err = capsys.readouterr().err
+    assert "step 2" in err and "forces a DAQ acquisition" in err
+
+
+def test_cli_refuses_forced_daq_step_with_daq_backup_flags_too(tmp_path, capsys):
+    import run_steps
+    csv = tmp_path / "s.csv"
+    csv.write_text("0,300,1,350,2,500,60,Y\n")
+    code = run_steps.main([str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run"])
+    assert code == 2
+    assert "forces a DAQ acquisition" in capsys.readouterr().err

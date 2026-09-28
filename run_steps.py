@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run a CSV step sequence (ramp -> settle -> hold/DAQ -> next step -> ramp down) without the UI.
 
-CSV rows: ch,V,ch,V,...,hold_s   (see example_steps.csv)
+CSV rows: ch,V,ch,V,...,hold_s[,DAQ Y/N]   (see example_steps.csv)
 
   --dry-run    validate the CSV + channel map and print the plan. No hardware, no caen_libs.
   --simulate   run the whole sequence against a fake crate in virtual time (DAQ not executed).
@@ -113,12 +113,17 @@ def main(argv=None):
             build_daq_argv(args.daq_cmd, step=1, duration="1", outdir=".", **{n.lower(): "0" for n in args.channel_map})
         except ValueError as e:
             errors.append(str(e))
+    for k, (_, _, want_daq) in enumerate(steps, 1):
+        if want_daq is True and not args.daq_cmd:
+            errors.append(f"step {k}: CSV column forces a DAQ acquisition (Y) but no --daq-cmd/"
+                          "--daq-backup+--daq-mask+--daq-eq was given")
     if errors:
         print("Cannot run:\n" + "\n".join(f"  - {e}" for e in errors), file=sys.stderr)
         return EXIT_REFUSED
 
     try:
-        lines, total = describe_plan(steps, args.channel_map, args.settle_s, args.stage_offset, args.min_delta)
+        lines, total = describe_plan(steps, args.channel_map, args.settle_s, args.stage_offset, args.min_delta,
+                                     daq_cmd=args.daq_cmd)
     except ValueError as e:
         print(f"Cannot run:\n  - {e}", file=sys.stderr)
         return EXIT_REFUSED

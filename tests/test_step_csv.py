@@ -62,7 +62,7 @@ def test_map_to_logical_orders_by_map_and_carries_hold():
     steps, _ = parse_steps_csv("2,350,1,350,0,300,60\n")
     out, errors = map_to_logical(steps, MAP3)
     assert errors == []
-    assert out == [({"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0}, 60.0)]
+    assert out == [({"Grid": 300.0, "Anode": 350.0, "Cathode": 350.0}, 60.0, None)]
     assert list(out[0][0]) == ["Grid", "Anode", "Cathode"]
 
 
@@ -92,3 +92,50 @@ def test_map_to_logical_accepts_a_custom_check():
     assert out == [] and errors == ["line 1: nope"]
     out, errors = map_to_logical(steps, MAP3, check=lambda t: [])
     assert errors == [] and len(out) == 1
+
+
+# ------------------------------------------------------------------ optional trailing DAQ Y/N column
+@pytest.mark.parametrize("text, expected", [
+    ("y", True), ("Y", True), ("yes", True), ("Yes", True), ("true", True), ("TRUE", True), ("1", True),
+    ("n", False), ("N", False), ("no", False), ("false", False), ("0", False),
+])
+def test_daq_column_accepts_yn_and_synonyms_case_insensitively(text, expected):
+    steps, errors = parse_steps_csv(f"0,300,1,350,2,350,600,{text}\n")
+    assert errors == [] and steps[0].daq is expected
+
+
+def test_daq_column_omitted_defaults_to_none():
+    steps, errors = parse_steps_csv("0,300,1,350,2,350,600\n")
+    assert errors == [] and steps[0].daq is None
+
+
+def test_daq_column_rejects_unrecognised_text():
+    # "maybe" isn't a recognised Y/N word, so it is never silently consumed as the DAQ column: the row
+    # is reported as a plain wrong-field-count error, with a hint about the Y/N column requirement.
+    steps, errors = parse_steps_csv("0,300,1,350,2,350,600,maybe\n")
+    assert steps == [] and "got 8" in errors[0] and "'maybe'" in errors[0] and "must be Y/N" in errors[0]
+
+
+def test_missing_hold_time_is_not_silently_reinterpreted_as_a_daq_column():
+    # 4 fields (even, like ch,V,hold,DAQ) but the last field "350" is not Y/N-like: this is a plain
+    # missing-hold-time mistake. No step is produced (never silently misinterpreted), and the primary
+    # message is the field-count error, not a bad-DAQ-flag diagnosis.
+    steps, errors = parse_steps_csv("0,300,1,350\n")
+    assert steps == [] and "odd number" in errors[0] and "got 4" in errors[0]
+
+
+def test_single_channel_with_daq_column_is_four_fields():
+    steps, errors = parse_steps_csv("0,300,600,Y\n")
+    assert errors == [] and steps[0].voltages == {0: 300.0} and steps[0].hold_s == 600.0 and steps[0].daq is True
+
+
+def test_trailing_comma_stripping_does_not_get_misread_as_a_daq_column():
+    steps, errors = parse_steps_csv("0,300,1,350,2,350,600,,\n")
+    assert errors == [] and steps[0].daq is None
+
+
+def test_map_to_logical_passes_the_daq_flag_through():
+    steps, _ = parse_steps_csv("0,300,1,350,2,350,60,Y\n0,300,1,350,2,350,60,N\n0,300,1,350,2,350,60\n")
+    out, errors = map_to_logical(steps, MAP3)
+    assert errors == []
+    assert [flag for _, _, flag in out] == [True, False, None]

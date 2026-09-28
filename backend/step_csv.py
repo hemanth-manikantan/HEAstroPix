@@ -1,6 +1,10 @@
 """Step-sequence CSV parsing. No hardware imports: safe to use and test offline.
 
-Row format:  ch,V,ch,V,...,hold_s   (physical channel numbers, volts, seconds)
+Row format:  ch,V,ch,V,...,hold_s[,DAQ]   (physical channel numbers, volts, seconds)
+The trailing DAQ column is optional: Y/yes/true/1 forces an acquisition (an error if no
+DAQ command is configured for the run), N/no/false/0 forces a hold with no acquisition,
+and omitting the column follows the run's own default (acquire iff a DAQ command was given
+to run_steps.py) -- exactly the old, column-less behaviour.
 Blank lines and lines starting with '#' are ignored. An optional header row
 (first field non-numeric) is allowed as the first row only.
 """
@@ -8,12 +12,16 @@ import csv
 import math
 from dataclasses import dataclass
 
+_DAQ_TRUE = {"y", "yes", "true", "1"}
+_DAQ_FALSE = {"n", "no", "false", "0"}
+
 
 @dataclass(frozen=True)
 class CsvStep:
     line: int
     voltages: dict  # physical channel index -> volts
     hold_s: float
+    daq: object = None  # True (force), False (skip), or None (follow the run's default)
 
 
 def _to_float(text):
@@ -45,8 +53,20 @@ def parse_steps_csv(text, n_channels=6, max_v=9000.0):
         if "" in fields:
             errors.append(f"line {line_no}: empty field inside the row")
             continue
+
+        orig_count = len(fields)
+        daq_flag_text = None
+        # Only consume a trailing DAQ column when it looks like one (Y/N and friends): an even field
+        # count alone must not swallow a plain missing-hold-time typo into a confusing "bad DAQ flag" error.
+        if len(fields) % 2 == 0 and len(fields) >= 4 and fields[-1].strip().lower() in (_DAQ_TRUE | _DAQ_FALSE):
+            daq_flag_text, fields = fields[-1], fields[:-1]
         if len(fields) < 3 or len(fields) % 2 == 0:
-            errors.append(f"line {line_no}: expected ch,V,ch,V,...,hold_s (an odd number of fields, at least 3), got {len(fields)}")
+            hint = ""
+            if len(fields) % 2 == 0 and len(fields) >= 4:
+                hint = (f" (if '{fields[-1]}' is meant to be the DAQ column it must be Y/N - "
+                        "also accepts yes/no, true/false, 1/0 - otherwise a field is missing or extra)")
+            errors.append(f"line {line_no}: expected ch,V,ch,V,...,hold_s[,DAQ Y/N] "
+                          f"(an odd number of fields, optionally followed by a Y/N DAQ column), got {orig_count}{hint}")
             continue
 
         row_errors = []
@@ -82,10 +102,20 @@ def parse_steps_csv(text, n_channels=6, max_v=9000.0):
             hold = None
             row_errors.append(f"hold time '{fields[-1]}' is not a number")
 
+        daq = None
+        if daq_flag_text is not None:
+            flag_norm = daq_flag_text.strip().lower()
+            if flag_norm in _DAQ_TRUE:
+                daq = True
+            elif flag_norm in _DAQ_FALSE:
+                daq = False
+            else:
+                row_errors.append(f"DAQ column '{daq_flag_text}' must be Y/N (also accepts yes/no, true/false, 1/0)")
+
         if row_errors:
             errors.extend(f"line {line_no}: {e}" for e in row_errors)
         else:
-            steps.append(CsvStep(line=line_no, voltages=voltages, hold_s=hold))
+            steps.append(CsvStep(line=line_no, voltages=voltages, hold_s=hold, daq=daq))
 
     if not steps and not errors:
         errors.append("no steps found in file")
@@ -107,7 +137,7 @@ def map_to_logical(steps, channel_map, check=_default_check):
     """Translate physical channels to logical names using the DAQ tab's channel_map
     ({"Grid": "Ch0", ...}). Every mapped channel must appear in every step, and no
     other channel may appear. `check(targets)` returns a list of problem strings; the
-    default is the dashboard's Grid+10 V rule. Returns ([(targets, hold_s)], errors)."""
+    default is the dashboard's Grid+10 V rule. Returns ([(targets, hold_s, daq_flag)], errors)."""
     phys_to_name = {int(ch.replace("Ch", "")): name for name, ch in channel_map.items()}
     out, errors = [], []
     for s in steps:
@@ -124,5 +154,5 @@ def map_to_logical(steps, channel_map, check=_default_check):
         if problems:
             errors.extend(f"line {s.line}: {p}" for p in problems)
             continue
-        out.append((targets, s.hold_s))
+        out.append((targets, s.hold_s, s.daq))
     return out, errors

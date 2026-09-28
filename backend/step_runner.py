@@ -82,12 +82,19 @@ def checkpoints_for(cur, targets, grid_v_now, offset, min_delta):
     return plan_ramp_checkpoints(cur, targets, offset, min_delta, waypoints)
 
 
-def describe_plan(steps, channels, settle_s, offset=50.0, min_delta=20.0):
+def describe_plan(steps, channels, settle_s, offset=50.0, min_delta=20.0, daq_cmd=None):
     """Human-readable plan lines (including every checkpoint) and a rough duration estimate in seconds."""
     lines = ["Channel map: " + ", ".join(f"{n}=Ch{i}" for n, i in channels.items())]
     total, prev = 0.0, {n: 0.0 for n in channels}
-    for k, (targets, hold) in enumerate(steps, 1):
-        lines.append(f"  Step {k}: " + ", ".join(f"{n}={v:g} V" for n, v in targets.items()) + f", hold {hold:g} s")
+    for k, (targets, hold, want_daq) in enumerate(steps, 1):
+        if want_daq is True:
+            daq_note = "DAQ"
+        elif want_daq is False:
+            daq_note = "no DAQ (CSV)"
+        else:
+            daq_note = "DAQ" if daq_cmd else "no DAQ"
+        lines.append(f"  Step {k}: " + ", ".join(f"{n}={v:g} V" for n, v in targets.items())
+                    + f", hold {hold:g} s, {daq_note}")
         cps = checkpoints_for(prev, targets, prev.get("Grid", 0.0), offset, min_delta)
         pos = prev
         for cp in cps:
@@ -118,10 +125,12 @@ class StepRunner:
         self.min_delta, self.stage_offset, self.delta_meas_tol = min_delta, stage_offset, delta_meas_tol
         if stage_offset < min_delta:
             raise ValueError(f"stage offset {stage_offset:g} V must be >= min delta {min_delta:g} V")
-        for k, (targets, _) in enumerate(self.steps, 1):
+        for k, (targets, _, want_daq) in enumerate(self.steps, 1):
             bad = ordering_violations(targets, min_delta, tol=0.0, floor=-1.0, strict_cathode=True)
             if bad:
                 raise ValueError(f"step {k}: " + "; ".join(bad))
+            if want_daq is True and not daq_cmd:
+                raise ValueError(f"step {k}: CSV forces a DAQ acquisition (Y) but no DAQ command was configured")
         self.hv_active = False      # True once the script may have put HV on the channels
         self.expect_power = False   # mapped channels must stay powered (else: crate trip)
         self._abort_reason = None
@@ -310,11 +319,20 @@ class StepRunner:
         for k, checkpoint in enumerate(checkpoints, 1):
             self.ramp_to(checkpoint, f"step {idx + 1} checkpoint {k}/{len(checkpoints)}")
 
-    def hold(self, idx, targets, hold_s):
-        if self.daq_cmd:
+    def _wants_daq(self, want_daq):
+        """want_daq: True (CSV forces it), False (CSV skips it), or None (follow --daq-cmd)."""
+        if want_daq is False:
+            return False
+        if want_daq is True:
+            return True  # constructor already guaranteed self.daq_cmd is set in this case
+        return bool(self.daq_cmd)
+
+    def hold(self, idx, targets, hold_s, want_daq=None):
+        if self._wants_daq(want_daq):
             self._hold_with_daq(idx, targets, hold_s)
             return
-        self.log.info("step %d: holding %g s (no DAQ command)", idx + 1, hold_s)
+        reason = "DAQ skipped for this step (CSV column = N)" if want_daq is False else "no DAQ command configured"
+        self.log.info("step %d: holding %g s (%s)", idx + 1, hold_s, reason)
         t0 = self.clock.time()
         while self.clock.time() - t0 < hold_s:
             self._cycle("hold", targets)
@@ -440,10 +458,10 @@ class StepRunner:
             try:
                 self.preflight(confirm)
                 self._power_on_if_needed()
-                for i, (targets, hold_s) in enumerate(self.steps):
+                for i, (targets, hold_s, want_daq) in enumerate(self.steps):
                     self.log.info("=== step %d/%d ===", i + 1, len(self.steps))
                     self.go_to(targets, i)
-                    self.hold(i, targets, hold_s)
+                    self.hold(i, targets, hold_s, want_daq)
                 self.log.info("all steps complete")
                 return self._finish("sequence complete", False, EXIT_OK)
             except Refused as e:
