@@ -73,7 +73,8 @@ def build_parser():
     p.add_argument("--zero-tol", type=float, default=5.0, help="|VMon| below this counts as 0 V (V)")
     p.add_argument("--on-trip", choices=["shutdown", "ramp"], default="shutdown",
                    help="shutdown = backend shutdown() (V=0, 2 s, Pw off; same as the UI). ramp = controlled ramp at 10 V/s")
-    p.add_argument("--outdir", help="default: run_logs/<timestamp>")
+    p.add_argument("--outdir", help="where run.log, steps.csv, hv_log_*.csv and step_data_files.csv are written "
+                                    "(default: ~/HEAstroPix_runs/<timestamp>, outside the project checkout)")
     p.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--simulate", action="store_true")
@@ -157,7 +158,7 @@ def main(argv=None):
               "the dashboard (hypex2). Nothing was connected.", file=sys.stderr)
         return EXIT_REFUSED
 
-    outdir = Path(args.outdir or Path("run_logs") / datetime.now().strftime("%Y%m%d_%H%M%S"))
+    outdir = Path(args.outdir or Path.home() / "HEAstroPix_runs" / datetime.now().strftime("%Y%m%d_%H%M%S"))
     outdir.mkdir(parents=True, exist_ok=False)
     (outdir / "steps.csv").write_text(Path(args.steps_csv).read_text(encoding="utf-8-sig"))
     log = setup_logging(outdir)
