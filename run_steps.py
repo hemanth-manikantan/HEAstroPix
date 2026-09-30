@@ -115,9 +115,9 @@ def main(argv=None):
         else:
             errors += check_daq_inputs(*daq_files)
             cmd_parts = [sys.executable, str(Path(__file__).with_name("run_daq.py")),
-                        "--backup", args.daq_backup, "--mask", args.daq_mask,
-                        "--equalisation", args.daq_eq, "--step", "{step}"]
-            cmd_parts += ["--continuous"] if args.daq_continuous else ["--duration", "{duration}"]
+                        "--backup", args.daq_backup, "--mask", args.daq_mask, "--equalisation", args.daq_eq]
+            # continuous mode is one subprocess for the WHOLE sequence: no per-step {step}/{duration} to fill in
+            cmd_parts += ["--continuous"] if args.daq_continuous else ["--duration", "{duration}", "--step", "{step}"]
             args.daq_cmd = shlex.join(cmd_parts)
     # --simulate never executes any DAQ command, so a command's validity there is moot (see describe_plan below
     # for what WOULD run for real; here we only need to know whether one is configured for that real run).
@@ -138,7 +138,8 @@ def main(argv=None):
 
     try:
         lines, total = describe_plan(steps, args.channel_map, args.settle_s, args.stage_offset, args.min_delta,
-                                     daq_cmd=args.daq_cmd, daq_continuous=args.daq_continuous)
+                                     daq_cmd=args.daq_cmd, daq_continuous=args.daq_continuous,
+                                     daq_startup_grace_s=args.daq_startup_grace_s)
     except ValueError as e:
         print(f"Cannot run:\n  - {e}", file=sys.stderr)
         return EXIT_REFUSED

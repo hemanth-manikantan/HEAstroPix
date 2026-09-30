@@ -169,8 +169,9 @@ def test_cli_daq_continuous_builds_a_continuous_run_daq_command(tmp_path, capsys
                            "--daq-backup", str(backup), "--daq-mask", str(mask), "--daq-eq", str(eq)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "--continuous" in out and "--duration" not in out
-    assert "DAQ (continuous, covers ramp)" in out
+    assert "--continuous" in out and "--duration" not in out and "--step" not in out
+    assert "one continuous acquisition for the whole sequence" in out
+    assert "science (Y)" in out
 
 
 def test_cli_simulate_ignores_forced_y_step_since_no_daq_ever_runs(tmp_path):
