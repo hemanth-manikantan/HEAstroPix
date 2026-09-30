@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from backend.simulated_hv import SimulatedDetectorHV, SimulatedCaenDevice, SimClock
-from backend.step_runner import (RealClock, StepRunner, build_daq_argv, EXIT_OK, EXIT_ABORTED,
+from backend.step_runner import (RealClock, StepRunner, RunAbort, build_daq_argv, EXIT_OK, EXIT_ABORTED,
                                  EXIT_REFUSED, EXIT_TRIP, EXIT_UNSAFE)
 from tests.helpers import MAP3, step
 
@@ -389,3 +389,107 @@ def test_wants_daq_resolution_table():
         assert runner._wants_daq(None) is bool(daq_cmd)
     runner.daq_cmd = "cmd"
     assert runner._wants_daq(True) is True
+
+
+# ------------------------------------------------------------------ continuous DAQ (covers ramp + hold)
+def test_check_daq_alive_noop_when_unset_or_alive(make_runner):
+    hv, runner = make_runner([step(100, 30)])
+    runner._check_daq_alive()  # no proc tracked: no-op
+
+    class AliveProc:
+        def poll(self):
+            return None
+    runner._active_daq_proc = AliveProc()
+    runner._check_daq_alive()  # still alive: no-op
+
+
+def test_check_daq_alive_raises_when_the_tracked_process_has_exited(make_runner):
+    hv, runner = make_runner([step(100, 30)])
+
+    class DeadProc:
+        returncode = 5
+        def poll(self):
+            return 5
+    runner._active_daq_proc = DeadProc()
+    with pytest.raises(RunAbort, match="exited unexpectedly"):
+        runner._check_daq_alive()
+
+
+def test_constructor_rejects_daq_continuous_without_a_daq_cmd(vclock, log, tmp_path):
+    with pytest.raises(ValueError, match="daq_continuous requires"):
+        StepRunner(SimulatedDetectorHV(clock=vclock), MAP3, [step(100, 10, daq=None)], tmp_path,
+                  clock=vclock, log=log, daq_continuous=True)
+
+
+CONTINUOUS_MARKER = (
+    "import sys, signal, time\n"
+    "outdir = sys.argv[1]\n"
+    "open(outdir + '/started.txt', 'w').write(str(time.time()))\n"
+    "stop = []\n"
+    "signal.signal(signal.SIGINT, lambda *a: stop.append(1))\n"
+    "signal.signal(signal.SIGTERM, lambda *a: stop.append(1))\n"
+    "hb = open(outdir + '/heartbeat.txt', 'a')\n"
+    "while not stop:\n"
+    "    hb.write(str(time.time()) + chr(10)); hb.flush()\n"
+    "    time.sleep(0.05)\n"
+    "open(outdir + '/stopped.txt', 'w').write(str(time.time()))\n"
+)
+
+
+@pytest.fixture
+def continuous_runner(log, tmp_path):
+    (tmp_path / "out").mkdir(exist_ok=True)
+
+    def factory(daq_code, hold=0.5, steps=None, ramp_rate=50.0, **kw):
+        hv = SimulatedDetectorHV(clock=RealClock(), ramp_rate=ramp_rate)
+        cmd = shlex.join([sys.executable, "-c", daq_code, "{outdir}", "{step}", "{grid}"])
+        kw.setdefault("daq_grace_s", 2.0)
+        kw.setdefault("daq_startup_grace_s", 0.3)
+        runner = StepRunner(hv, MAP3, steps or [step(100, hold)], tmp_path / "out", clock=RealClock(), log=log,
+                            settle_s=0.1, poll_s=0.05, daq_cmd=cmd, power_on=True, daq_continuous=True, **kw)
+        return hv, runner
+    return factory
+
+
+def test_continuous_daq_starts_before_the_ramp_and_stops_after_the_hold(continuous_runner, tmp_path):
+    hv, runner = continuous_runner(CONTINUOUS_MARKER)
+    assert runner.run(YES) == EXIT_OK
+    stepdir = tmp_path / "out" / "step_01"
+    started = float((stepdir / "started.txt").read_text())
+    heartbeats = [float(l) for l in (stepdir / "heartbeat.txt").read_text().splitlines() if l.strip()]
+
+    v0set_times = [c[0] for c in hv.device.commands if c[1] == "V0Set" and any(v != 0.0 for v in [c[3]])]
+    assert v0set_times, "the step must have actually ramped"
+    first_nonzero_vset = min(v0set_times)
+
+    assert started < first_nonzero_vset, "DAQ must be launched before any voltage is commanded"
+    assert any(h > first_nonzero_vset for h in heartbeats), "DAQ must still be alive during/after the ramp"
+    assert_safe_end(hv)
+
+
+def test_continuous_daq_dying_during_startup_grace_blocks_the_ramp(continuous_runner):
+    hv, runner = continuous_runner("import sys; sys.exit(9)")
+    assert runner.run(YES) == EXIT_ABORTED
+    # power-on-at-0V is a required precondition and does happen; the ramp toward the step's target must not
+    assert all(c[3] == 0.0 for c in hv.device.commands if c[1] == "V0Set")
+    assert_safe_end(hv)
+
+
+def test_continuous_daq_dying_during_the_hold_aborts_and_ramps_down(continuous_runner):
+    hv, runner = continuous_runner("import time; time.sleep(0.15); import sys; sys.exit(0)", hold=3.0)
+    assert runner.run(YES) == EXIT_ABORTED
+    assert_safe_end(hv)
+
+
+def test_daq_continuous_only_applies_to_steps_that_resolve_to_acquiring(continuous_runner, tmp_path):
+    steps_list = [step(100, 0.3, daq=False), step(200, 0.3, daq=True)]
+    hv, runner = continuous_runner(CONTINUOUS_MARKER, steps=steps_list)
+    assert runner.run(YES) == EXIT_OK
+    assert not (tmp_path / "out/step_01/started.txt").exists()
+    assert (tmp_path / "out/step_02/started.txt").exists()
+
+
+def test_describe_plan_notes_continuous_mode():
+    from backend.step_runner import describe_plan
+    lines, _ = describe_plan([step(300, 60)], MAP3, settle_s=5.0, daq_cmd="x", daq_continuous=True)
+    assert any("continuous, covers ramp" in l for l in lines)

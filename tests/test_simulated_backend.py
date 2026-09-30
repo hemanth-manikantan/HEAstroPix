@@ -135,3 +135,48 @@ def test_cli_refuses_forced_daq_step_with_daq_backup_flags_too(tmp_path, capsys)
     code = run_steps.main([str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run"])
     assert code == 2
     assert "forces a DAQ acquisition" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ --daq-continuous
+def _daq_files(tmp_path):
+    import json
+    backup, mask, eq = tmp_path / "b.TPX3", tmp_path / "m.h5", tmp_path / "e.h5"
+    backup.write_text(json.dumps({"Ibias_Ikrum": 7}))
+    mask.write_bytes(b"mask")
+    eq.write_bytes(b"eq")
+    return backup, mask, eq
+
+
+def test_cli_daq_continuous_requires_the_daq_backup_trio(tmp_path, capsys):
+    import run_steps
+    csv = tmp_path / "s.csv"
+    csv.write_text("0,300,1,350,2,500,60\n")
+    base = [str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run", "--daq-continuous"]
+
+    assert run_steps.main(base) == 2
+    assert "--daq-continuous requires" in capsys.readouterr().err
+
+    assert run_steps.main(base + ["--daq-cmd", "echo {step}"]) == 2
+    assert "--daq-continuous requires" in capsys.readouterr().err
+
+
+def test_cli_daq_continuous_builds_a_continuous_run_daq_command(tmp_path, capsys):
+    import run_steps
+    backup, mask, eq = _daq_files(tmp_path)
+    csv = tmp_path / "s.csv"
+    csv.write_text("0,300,1,350,2,500,60,Y\n")
+    code = run_steps.main([str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--dry-run", "--daq-continuous",
+                           "--daq-backup", str(backup), "--daq-mask", str(mask), "--daq-eq", str(eq)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "--continuous" in out and "--duration" not in out
+    assert "DAQ (continuous, covers ramp)" in out
+
+
+def test_cli_simulate_ignores_forced_y_step_since_no_daq_ever_runs(tmp_path):
+    import run_steps
+    csv = tmp_path / "s.csv"
+    csv.write_text("0,300,1,350,2,500,10,Y\n")
+    # forcing Y with no daq configured is refused for a REAL run, but --simulate never runs DAQ at all
+    code = run_steps.main([str(csv), "--channel-map", "Grid=0,Anode=1,Cathode=2", "--simulate"])
+    assert code == 0

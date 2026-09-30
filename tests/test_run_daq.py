@@ -59,6 +59,12 @@ def run(files, tmp_path, backend, duration="600", extra=()):
                          "--duration", duration, "--data-dir", str(tmp_path / "hdf"), *extra], backend=backend)
 
 
+def run_raw(files, tmp_path, backend, extra=()):
+    backup, mask, eq = files
+    return run_daq.main(["--backup", str(backup), "--mask", str(mask), "--equalisation", str(eq),
+                         "--data-dir", str(tmp_path / "hdf"), *extra], backend=backend)
+
+
 def test_happy_path_loads_everything_by_full_path_then_runs_and_reports_the_file(files, tmp_path, capsys):
     backend = FakeBackend(tmp_path / "hdf")
     assert run(files, tmp_path, backend, duration="600.4", extra=["--step", "3"]) == 0
@@ -125,6 +131,41 @@ def test_empty_data_file_is_a_failure(files, tmp_path):
 def test_interrupt_returns_130_but_still_reports_the_partial_file(files, tmp_path, capsys):
     assert run(files, tmp_path, FakeBackend(tmp_path / "hdf", interrupt=True)) == 130
     assert "DAQ_OUTPUT:" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ --continuous mode
+def test_continuous_and_duration_together_is_refused(files, tmp_path, capsys):
+    backend = FakeBackend(tmp_path / "hdf")
+    assert run(files, tmp_path, backend, extra=["--continuous"]) == 1
+    assert "use either --continuous or --duration, not both" in capsys.readouterr().err
+    assert backend.calls == []
+
+
+def test_neither_continuous_nor_duration_is_refused(files, tmp_path, capsys):
+    backend = FakeBackend(tmp_path / "hdf")
+    assert run_raw(files, tmp_path, backend) == 1
+    assert "either --continuous or --duration is required" in capsys.readouterr().err
+    assert backend.calls == []
+
+
+def test_continuous_stopped_on_request_with_valid_file_is_success_not_130(files, tmp_path, capsys):
+    backend = FakeBackend(tmp_path / "hdf", interrupt=True)   # stands in for a SIGINT arriving mid-acquisition
+    assert run_raw(files, tmp_path, backend, extra=["--continuous"]) == 0
+    out = capsys.readouterr().out
+    assert "DAQ_OUTPUT:" in out and "duration_s=continuous" in out
+    assert backend.calls[-1] == ("run", 0)   # scan_timeout=0 passed through to tpx3-daq
+
+
+def test_continuous_stopped_before_any_data_is_still_a_failure(files, tmp_path, capsys):
+    backend = FakeBackend(tmp_path / "hdf", interrupt=True, produce=False)
+    assert run_raw(files, tmp_path, backend, extra=["--continuous"]) == 3
+    assert "no data file appeared" in capsys.readouterr().err
+
+
+def test_continuous_does_not_run_whole_seconds_guard(files, tmp_path):
+    # a --continuous run has no --duration at all, so the "0 would mean infinite" guard must not fire
+    backend = FakeBackend(tmp_path / "hdf")
+    assert run_raw(files, tmp_path, backend, extra=["--continuous"]) == 0
 
 
 def test_help_and_argument_errors_need_no_tpx3():
