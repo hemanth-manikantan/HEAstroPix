@@ -169,8 +169,10 @@ def test_cli_daq_continuous_builds_a_continuous_run_daq_command(tmp_path, capsys
                            "--daq-backup", str(backup), "--daq-mask", str(mask), "--daq-eq", str(eq)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "--continuous" in out and "--duration" not in out and "--step" not in out
-    assert "one continuous acquisition for the whole sequence" in out
+    # the base command carries neither flag: StepRunner appends --continuous or --duration itself, per subprocess
+    assert "--continuous" not in out and "--duration" not in out and "--step" not in out
+    assert "run_daq.py" in out and str(backup) in out
+    assert "continuous monitoring by default" in out
     assert "science (Y)" in out
 
 

@@ -52,12 +52,16 @@ def build_parser():
     p.add_argument("--daq-eq", help="Timepix3 equalisation (.h5), full path")
     p.add_argument("--daq-grace-s", type=float, default=120.0, help="extra time allowed past the hold before the DAQ is killed")
     p.add_argument("--daq-continuous", action="store_true",
-                   help="extend an acquiring step's DAQ to also cover the ramp into it, not just its hold, for "
-                        "continuous monitoring during ramp-up/down. Requires --daq-backup+--daq-mask+--daq-eq "
-                        "(not a raw --daq-cmd). The final ramp-to-zero is never covered.")
+                   help="run an indefinite monitoring DAQ acquisition by default, covering every ramp and every "
+                        "non-acquiring ('N') hold; once a 'Y' step's ramp settles, stop the monitor and run a "
+                        "separate fixed-duration DAQ acquisition for exactly that step's hold (its own data "
+                        "file), then resume monitoring until the next 'Y' step. Requires --daq-backup+"
+                        "--daq-mask+--daq-eq (not a raw --daq-cmd). There is a brief gap whenever the monitor "
+                        "(re)starts. The final ramp-to-zero is never covered.")
     p.add_argument("--daq-startup-grace-s", type=float, default=5.0,
-                   help="with --daq-continuous: seconds to wait after launching DAQ, checking it stays alive, "
-                        "before starting to ramp; tune to your hardware's actual chip-init time")
+                   help="with --daq-continuous: seconds to wait after (re)starting the monitor DAQ, checking it "
+                        "stays alive, before ramping; tune to your hardware's actual chip-init time (this delay "
+                        "repeats each time the monitor restarts after a 'Y' step)")
     p.add_argument("--power-on", action="store_true", help="allow the script to power ON mapped channels (at 0 V) if they are OFF")
     p.add_argument("--keep-power", action="store_true", help="leave channels powered ON (at 0 V) at the end")
     p.add_argument("--min-delta", type=float, default=20.0,
@@ -117,8 +121,10 @@ def main(argv=None):
             errors += check_daq_inputs(*daq_files)
             cmd_parts = [sys.executable, str(Path(__file__).with_name("run_daq.py")),
                         "--backup", args.daq_backup, "--mask", args.daq_mask, "--equalisation", args.daq_eq]
-            # continuous mode is one subprocess for the WHOLE sequence: no per-step {step}/{duration} to fill in
-            cmd_parts += ["--continuous"] if args.daq_continuous else ["--duration", "{duration}", "--step", "{step}"]
+            # continuous mode: StepRunner appends --continuous (monitor segments) or --duration (science
+            # bursts) itself per subprocess, so this base command carries neither
+            if not args.daq_continuous:
+                cmd_parts += ["--duration", "{duration}", "--step", "{step}"]
             args.daq_cmd = shlex.join(cmd_parts)
     # --simulate never executes any DAQ command, so a command's validity there is moot (see describe_plan below
     # for what WOULD run for real; here we only need to know whether one is configured for that real run).
