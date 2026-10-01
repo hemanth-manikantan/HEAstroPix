@@ -6,8 +6,10 @@ accept names inside ~/Timepix3/... and print "loaded" even when the file was not
 what was actually loaded), then calls the same Run_Datataking function the tpx3 CLI uses.
 
 Prints one 'DAQ_OUTPUT: <path>' line per new data file so the HV runner can log it against the step.
+--continuous runs with no fixed duration (tpx3-daq scan_timeout=0) until stopped by SIGINT/SIGTERM,
+for continuous monitoring during an HV ramp; a deliberate stop with a valid file is then exit 0, not 130.
 Exit codes: 0 ok | 1 bad input / settings not loaded (nothing acquired) | 3 no data file produced
-            130 interrupted (SIGINT/SIGTERM; the data taken so far is kept)
+            130 interrupted with --duration (fixed-length run stopped early; the partial data is kept)
 Needs the environment where tpx3-daq is installed (the editable install in hypex2).
 """
 import argparse
@@ -90,7 +92,10 @@ def build_parser():
     p.add_argument("--backup", required=True, help="DAC settings backup (.TPX3), full path")
     p.add_argument("--mask", required=True, help="mask file (.h5), full path")
     p.add_argument("--equalisation", required=True, help="equalisation file (.h5), full path")
-    p.add_argument("--duration", required=True, type=float, help="data-taking time in seconds (>= 1)")
+    p.add_argument("--duration", type=float, help="data-taking time in seconds (>= 1); exactly one of "
+                                                   "--duration/--continuous is required")
+    p.add_argument("--continuous", action="store_true", help="run with no fixed duration, until stopped "
+                                                              "by SIGINT/SIGTERM (see module docstring)")
     p.add_argument("--step", help="HV step number, only for the log")
     p.add_argument("--data-dir", help="where tpx3-daq writes runs (default ~/Timepix3/data/hdf)")
     return p
@@ -99,10 +104,16 @@ def build_parser():
 def main(argv=None, backend=None):
     args = build_parser().parse_args(argv)
     errors = check_daq_inputs(args.backup, args.mask, args.equalisation)
-    try:
-        seconds = whole_seconds(args.duration)
-    except ValueError as e:
-        errors.append(str(e))
+    seconds = 0
+    if args.continuous and args.duration is not None:
+        errors.append("use either --continuous or --duration, not both")
+    elif not args.continuous and args.duration is None:
+        errors.append("either --continuous or --duration is required")
+    elif not args.continuous:
+        try:
+            seconds = whole_seconds(args.duration)
+        except ValueError as e:
+            errors.append(str(e))
     if errors:
         print("DAQ not started:\n" + "\n".join(f"  - {e}" for e in errors), file=sys.stderr)
         return 1
@@ -122,7 +133,8 @@ def main(argv=None, backend=None):
         if backend.write_value(name, path) is not True or backend.read_value(name) != path:
             print(f"DAQ not started: could not set {name} to {path}", file=sys.stderr)
             return 1
-    print(f"DAQ_CONFIG: step={args.step} backup={backup} mask={mask} equalisation={equal} duration_s={seconds}", flush=True)
+    duration_note = "continuous" if args.continuous else seconds
+    print(f"DAQ_CONFIG: step={args.step} backup={backup} mask={mask} equalisation={equal} duration_s={duration_note}", flush=True)
 
     data_dir = Path(args.data_dir) if args.data_dir else Path.home() / "Timepix3" / "data" / "hdf"
     before = {p: p.stat().st_mtime for p in data_dir.glob("*.h5")} if data_dir.is_dir() else {}
@@ -144,9 +156,21 @@ def main(argv=None, backend=None):
     files = new_data_files(data_dir, before, t_start) if data_dir.is_dir() else []
     for f in files:
         print(f"DAQ_OUTPUT: {f}", flush=True)
+    have_data = bool(files) and any(f.stat().st_size > 0 for f in files)
+
+    if args.continuous:
+        # A SIGINT/SIGTERM is the ONLY way a continuous run ever ends, so a deliberate stop that
+        # produced a valid file is success (0), not the "interrupted early" 130 used for --duration.
+        if have_data:
+            print(f"DAQ finished (stopped on request): {len(files)} data file(s)", flush=True)
+            return 0
+        print(f"DAQ FAILED: no data file appeared in {data_dir} (stopped before any data was captured?)",
+              file=sys.stderr)
+        return 3
+
     if interrupted:
         return 130
-    if not files or all(f.stat().st_size == 0 for f in files):
+    if not have_data:
         print(f"DAQ FAILED: no data file appeared in {data_dir} (check the messages above)", file=sys.stderr)
         return 3
     print(f"DAQ finished: {len(files)} data file(s)", flush=True)

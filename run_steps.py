@@ -51,6 +51,17 @@ def build_parser():
     p.add_argument("--daq-mask", help="Timepix3 mask (.h5), full path")
     p.add_argument("--daq-eq", help="Timepix3 equalisation (.h5), full path")
     p.add_argument("--daq-grace-s", type=float, default=120.0, help="extra time allowed past the hold before the DAQ is killed")
+    p.add_argument("--daq-continuous", action="store_true",
+                   help="run an indefinite monitoring DAQ acquisition by default, covering every ramp and every "
+                        "non-acquiring ('N') hold; once a 'Y' step's ramp settles, stop the monitor and run a "
+                        "separate fixed-duration DAQ acquisition for exactly that step's hold (its own data "
+                        "file), then resume monitoring until the next 'Y' step. Requires --daq-backup+"
+                        "--daq-mask+--daq-eq (not a raw --daq-cmd). There is a brief gap whenever the monitor "
+                        "(re)starts. The final ramp-to-zero is never covered.")
+    p.add_argument("--daq-startup-grace-s", type=float, default=5.0,
+                   help="with --daq-continuous: seconds to wait after (re)starting the monitor DAQ, checking it "
+                        "stays alive, before ramping; tune to your hardware's actual chip-init time (this delay "
+                        "repeats each time the monitor restarts after a 'Y' step)")
     p.add_argument("--power-on", action="store_true", help="allow the script to power ON mapped channels (at 0 V) if they are OFF")
     p.add_argument("--keep-power", action="store_true", help="leave channels powered ON (at 0 V) at the end")
     p.add_argument("--min-delta", type=float, default=20.0,
@@ -66,7 +77,8 @@ def build_parser():
     p.add_argument("--zero-tol", type=float, default=5.0, help="|VMon| below this counts as 0 V (V)")
     p.add_argument("--on-trip", choices=["shutdown", "ramp"], default="shutdown",
                    help="shutdown = backend shutdown() (V=0, 2 s, Pw off; same as the UI). ramp = controlled ramp at 10 V/s")
-    p.add_argument("--outdir", help="default: run_logs/<timestamp>")
+    p.add_argument("--outdir", help="where run.log, steps.csv, hv_log_*.csv and step_data_files.csv are written "
+                                    "(default: ~/HEAstroPix_runs/<timestamp>, outside the project checkout)")
     p.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--simulate", action="store_true")
@@ -98,6 +110,8 @@ def main(argv=None):
     if "Grid" not in args.channel_map:
         errors.append("channel map must include Grid")
     daq_files = [args.daq_backup, args.daq_mask, args.daq_eq]
+    if args.daq_continuous and not all(daq_files):
+        errors.append("--daq-continuous requires --daq-backup, --daq-mask and --daq-eq (not a raw --daq-cmd)")
     if any(daq_files):
         if args.daq_cmd:
             errors.append("use either --daq-cmd or --daq-backup/--daq-mask/--daq-eq, not both")
@@ -105,16 +119,24 @@ def main(argv=None):
             errors.append("--daq-backup, --daq-mask and --daq-eq must all be given together")
         else:
             errors += check_daq_inputs(*daq_files)
-            args.daq_cmd = shlex.join([sys.executable, str(Path(__file__).with_name("run_daq.py")),
-                                       "--backup", args.daq_backup, "--mask", args.daq_mask,
-                                       "--equalisation", args.daq_eq, "--duration", "{duration}", "--step", "{step}"])
-    if args.daq_cmd:
+            cmd_parts = [sys.executable, str(Path(__file__).with_name("run_daq.py")),
+                        "--backup", args.daq_backup, "--mask", args.daq_mask, "--equalisation", args.daq_eq]
+            # continuous mode: StepRunner appends --continuous (monitor segments) or --duration (science
+            # bursts) itself per subprocess, so this base command carries neither
+            if not args.daq_continuous:
+                cmd_parts += ["--duration", "{duration}", "--step", "{step}"]
+            args.daq_cmd = shlex.join(cmd_parts)
+    # --simulate never executes any DAQ command, so a command's validity there is moot (see describe_plan below
+    # for what WOULD run for real; here we only need to know whether one is configured for that real run).
+    real_daq_cmd = None if args.simulate else args.daq_cmd
+    if real_daq_cmd:
         try:
-            build_daq_argv(args.daq_cmd, step=1, duration="1", outdir=".", **{n.lower(): "0" for n in args.channel_map})
+            build_daq_argv(real_daq_cmd, step=1, duration="1", outdir=".", **{n.lower(): "0" for n in args.channel_map})
         except ValueError as e:
             errors.append(str(e))
     for k, (_, _, want_daq) in enumerate(steps, 1):
-        if want_daq is True and not args.daq_cmd:
+        # under --simulate no DAQ command ever runs anyway (see below), so a CSV forcing Y is not an error there
+        if want_daq is True and not real_daq_cmd and not args.simulate:
             errors.append(f"step {k}: CSV column forces a DAQ acquisition (Y) but no --daq-cmd/"
                           "--daq-backup+--daq-mask+--daq-eq was given")
     if errors:
@@ -123,7 +145,8 @@ def main(argv=None):
 
     try:
         lines, total = describe_plan(steps, args.channel_map, args.settle_s, args.stage_offset, args.min_delta,
-                                     daq_cmd=args.daq_cmd)
+                                     daq_cmd=args.daq_cmd, daq_continuous=args.daq_continuous,
+                                     daq_startup_grace_s=args.daq_startup_grace_s)
     except ValueError as e:
         print(f"Cannot run:\n  - {e}", file=sys.stderr)
         return EXIT_REFUSED
@@ -141,7 +164,7 @@ def main(argv=None):
               "the dashboard (hypex2). Nothing was connected.", file=sys.stderr)
         return EXIT_REFUSED
 
-    outdir = Path(args.outdir or Path("run_logs") / datetime.now().strftime("%Y%m%d_%H%M%S"))
+    outdir = Path(args.outdir or Path.home() / "HEAstroPix_runs" / datetime.now().strftime("%Y%m%d_%H%M%S"))
     outdir.mkdir(parents=True, exist_ok=False)
     (outdir / "steps.csv").write_text(Path(args.steps_csv).read_text(encoding="utf-8-sig"))
     log = setup_logging(outdir)
@@ -152,17 +175,22 @@ def main(argv=None):
         clock = SimClock()
         install_clock(clock)
         hv = SimulatedDetectorHV(clock=clock)
-        daq_cmd = None
+        daq_cmd, daq_continuous = None, False  # --simulate never runs a real DAQ command
+        # A CSV forcing Y is allowed under --simulate (checked above), but StepRunner's own constructor still
+        # requires daq_cmd whenever a step is True; since nothing runs anyway, drop to "no override" here only.
+        runner_steps = [(t, h, None if want is True else want) for t, h, want in steps]
     else:
         from backend.hvlogic import DetectorHV
-        clock, hv, daq_cmd = RealClock(), DetectorHV(args.ip), args.daq_cmd
+        clock, hv, daq_cmd, daq_continuous = RealClock(), DetectorHV(args.ip), args.daq_cmd, args.daq_continuous
+        runner_steps = steps
 
     runner = StepRunner(
-        hv, args.channel_map, steps, outdir, clock=clock, log=log, max_current_ua=args.max_current_ua,
+        hv, args.channel_map, runner_steps, outdir, clock=clock, log=log, max_current_ua=args.max_current_ua,
         v_tol=args.v_tol, hold_v_tol=args.hold_v_tol, settle_s=args.settle_s, zero_tol=args.zero_tol,
         on_trip=args.on_trip, daq_cmd=daq_cmd, daq_grace_s=args.daq_grace_s,
         power_on=args.power_on or args.simulate, keep_power=args.keep_power,
-        min_delta=args.min_delta, stage_offset=args.stage_offset, delta_meas_tol=args.delta_meas_tol)
+        min_delta=args.min_delta, stage_offset=args.stage_offset, delta_meas_tol=args.delta_meas_tol,
+        daq_continuous=daq_continuous, daq_startup_grace_s=args.daq_startup_grace_s)
 
     def handler(signum, frame):
         if not runner.hv_active:

@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from backend.simulated_hv import SimulatedDetectorHV, SimulatedCaenDevice, SimClock
-from backend.step_runner import (RealClock, StepRunner, build_daq_argv, EXIT_OK, EXIT_ABORTED,
+from backend.step_runner import (RealClock, StepRunner, RunAbort, build_daq_argv, EXIT_OK, EXIT_ABORTED,
                                  EXIT_REFUSED, EXIT_TRIP, EXIT_UNSAFE)
 from tests.helpers import MAP3, step
 
@@ -389,3 +389,177 @@ def test_wants_daq_resolution_table():
         assert runner._wants_daq(None) is bool(daq_cmd)
     runner.daq_cmd = "cmd"
     assert runner._wants_daq(True) is True
+
+
+# ------------------------------------------------------------------ continuous DAQ (covers ramp + hold)
+def test_check_daq_alive_noop_when_unset_or_alive(make_runner):
+    hv, runner = make_runner([step(100, 30)])
+    runner._check_daq_alive()  # no proc tracked: no-op
+
+    class AliveProc:
+        def poll(self):
+            return None
+    runner._active_daq_proc = AliveProc()
+    runner._check_daq_alive()  # still alive: no-op
+
+
+def test_check_daq_alive_raises_when_the_tracked_process_has_exited(make_runner):
+    hv, runner = make_runner([step(100, 30)])
+
+    class DeadProc:
+        returncode = 5
+        def poll(self):
+            return 5
+    runner._active_daq_proc = DeadProc()
+    with pytest.raises(RunAbort, match="exited unexpectedly"):
+        runner._check_daq_alive()
+
+
+def test_constructor_rejects_daq_continuous_without_a_daq_cmd(vclock, log, tmp_path):
+    with pytest.raises(ValueError, match="daq_continuous requires"):
+        StepRunner(SimulatedDetectorHV(clock=vclock), MAP3, [step(100, 10, daq=None)], tmp_path,
+                  clock=vclock, log=log, daq_continuous=True)
+
+
+# Stands in for run_daq.py in both of its modes: with "--continuous" (as the monitor is launched) it runs
+# until signalled; with "--duration N" (as a science burst is launched) it self-exits after N seconds. It
+# tells the two apart the same way run_daq.py would: by which flags follow its --outdir argument.
+HYBRID_MARKER = (
+    "import sys, signal, time\n"
+    "outdir = sys.argv[1]\n"
+    "rest = sys.argv[2:]\n"
+    "duration = float(rest[rest.index('--duration') + 1]) if '--duration' in rest else None\n"
+    "print('DAQ_OUTPUT: ' + outdir + '/data.h5', flush=True)\n"
+    "open(outdir + '/started.txt', 'w').write(str(time.time()))\n"
+    "stop = []\n"
+    "signal.signal(signal.SIGINT, lambda *a: stop.append(1))\n"
+    "signal.signal(signal.SIGTERM, lambda *a: stop.append(1))\n"
+    "hb = open(outdir + '/heartbeat.txt', 'a')\n"
+    "t0 = time.time()\n"
+    "while not stop and (duration is None or time.time() - t0 < duration):\n"
+    "    hb.write(str(time.time()) + chr(10)); hb.flush()\n"
+    "    time.sleep(0.02)\n"
+    "open(outdir + '/stopped.txt', 'w').write(str(time.time()))\n"
+    "sys.exit(0)\n"
+)
+
+
+@pytest.fixture
+def continuous_runner(log, tmp_path):
+    (tmp_path / "out").mkdir(exist_ok=True)
+
+    def factory(daq_code, hold=0.5, steps=None, ramp_rate=50.0, **kw):
+        hv = SimulatedDetectorHV(clock=RealClock(), ramp_rate=ramp_rate)
+        cmd = shlex.join([sys.executable, "-c", daq_code, "{outdir}"])
+        kw.setdefault("daq_startup_grace_s", 0.3)
+        kw.setdefault("daq_grace_s", 1.0)
+        runner = StepRunner(hv, MAP3, steps or [step(100, hold)], tmp_path / "out", clock=RealClock(), log=log,
+                            settle_s=0.1, poll_s=0.05, daq_cmd=cmd, power_on=True, daq_continuous=True, **kw)
+        return hv, runner
+    return factory
+
+
+def test_continuous_daq_starts_before_the_first_ramp_and_stays_alive_through_it(continuous_runner, tmp_path):
+    # a lone step with no CSV column follows --daq-cmd being set, i.e. it's an acquiring ("Y") step: its ramp
+    # is covered by monitor segment 1, which must be alive before any voltage moves
+    hv, runner = continuous_runner(HYBRID_MARKER)
+    assert runner.run(YES) == EXIT_OK
+    mdir = tmp_path / "out" / "monitor_01"
+    started = float((mdir / "started.txt").read_text())
+    heartbeats = [float(l) for l in (mdir / "heartbeat.txt").read_text().splitlines() if l.strip()]
+
+    v0set_times = [c[0] for c in hv.device.commands if c[1] == "V0Set" and c[3] != 0.0]
+    assert v0set_times, "the step must have actually ramped"
+    first_nonzero_vset = min(v0set_times)
+
+    assert started < first_nonzero_vset, "the monitor DAQ must be launched before any voltage is commanded"
+    assert any(h > first_nonzero_vset for h in heartbeats), "monitor DAQ must still be alive during/after the ramp"
+    assert_safe_end(hv)
+
+
+def test_continuous_daq_covers_every_step_including_n_steps_ramps(continuous_runner, tmp_path):
+    # the whole point of the feature: an N step's RAMP must still be monitored, not skipped entirely, AND a
+    # "Y" step must get its OWN distinct file rather than sharing the ongoing monitor's file
+    steps_list = [step(100, 0.3, daq=False), step(300, 0.3, daq=True), step(150, 0.3, daq=False)]
+    hv, runner = continuous_runner(HYBRID_MARKER, steps=steps_list)
+    assert runner.run(YES) == EXIT_OK
+    outdir = tmp_path / "out"
+    v0set = sorted((c[0], c[2][0]) for c in hv.device.commands if c[1] == "V0Set" and c[3] != 0.0)
+
+    def started_stopped(name):
+        d = outdir / name
+        return float((d / "started.txt").read_text()), float((d / "stopped.txt").read_text())
+
+    # monitor segment 1 covers step 1's ramp+hold and step 2's ramp-in; monitor segment 2 (started once
+    # step 2's science burst finishes) covers step 3's ramp+hold
+    m1_start, m1_stop = started_stopped("monitor_01")
+    sci_start, sci_stop = started_stopped("step_02")
+    m2_start, m2_stop = started_stopped("monitor_02")
+    assert m1_stop <= sci_start, "the monitor must stop before step 2's science burst starts"
+    assert sci_stop <= m2_start, "step 2's science burst must finish before the next monitor segment starts"
+    assert any(m1_start < t < m1_stop for t, _ in v0set), "step 1's ramp must be covered by monitor segment 1"
+    assert any(m2_start < t < m2_stop for t, _ in v0set), "step 3's ramp must be covered by monitor segment 2"
+
+    assert_safe_end(hv)
+
+    import csv as csvmod
+    rows = list(csvmod.DictReader(open(outdir / "step_data_files.csv")))
+    assert [r["step"] for r in rows] == ["1", "2", "3"]
+    assert [r["kind"] for r in rows] == ["monitor", "science", "monitor"]
+    assert len(set(r["data_files"] for r in rows)) == 3, "the science step and both monitor segments must all differ"
+    assert rows[0]["data_files"] == str(outdir / "monitor_01" / "data.h5")
+    assert rows[1]["data_files"] == str(outdir / "step_02" / "data.h5")
+    assert rows[2]["data_files"] == str(outdir / "monitor_02" / "data.h5")
+
+
+def test_continuous_daq_back_to_back_y_steps_each_get_their_own_file(continuous_runner, tmp_path):
+    # the exact scenario originally reported: consecutive acquiring steps must not merge into one file
+    steps_list = [step(100, 0.3, daq=True), step(300, 0.3, daq=True)]
+    hv, runner = continuous_runner(HYBRID_MARKER, steps=steps_list)
+    assert runner.run(YES) == EXIT_OK
+    outdir = tmp_path / "out"
+    assert (outdir / "monitor_02").exists(), "the ramp between the two science bursts must still be monitored"
+
+    import csv as csvmod
+    rows = list(csvmod.DictReader(open(outdir / "step_data_files.csv")))
+    assert [r["step"] for r in rows] == ["1", "2"]
+    assert [r["kind"] for r in rows] == ["science", "science"]
+    assert rows[0]["data_files"] == str(outdir / "step_01" / "data.h5")
+    assert rows[1]["data_files"] == str(outdir / "step_02" / "data.h5")
+    assert rows[0]["data_files"] != rows[1]["data_files"]
+
+
+def test_continuous_daq_dying_during_startup_grace_blocks_the_ramp(continuous_runner):
+    hv, runner = continuous_runner("import sys; sys.exit(9)")
+    assert runner.run(YES) == EXIT_ABORTED
+    # power-on-at-0V is a required precondition and does happen; the ramp toward the step's target must not
+    assert all(c[3] == 0.0 for c in hv.device.commands if c[1] == "V0Set")
+    assert_safe_end(hv)
+
+
+def test_continuous_daq_dying_mid_sequence_aborts_and_ramps_down(continuous_runner):
+    # the monitor (segment 1, covering step 1) behaves normally; step 2's dedicated SCIENCE burst dies
+    # partway into its long hold -- distinguished by "step_" appearing in its own --outdir argument
+    script = (
+        "import sys, signal, time\n"
+        "outdir = sys.argv[1]\n"
+        "if 'step_' in outdir:\n"
+        "    time.sleep(0.2); sys.exit(1)\n"
+        "else:\n"
+        "    signal.signal(signal.SIGINT, lambda *a: sys.exit(0))\n"
+        "    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
+        "    while True: time.sleep(0.05)\n"
+    )
+    steps_list = [step(100, 0.3, daq=False), step(300, 3.0, daq=True)]  # step 2's science DAQ dies mid-hold
+    hv, runner = continuous_runner(script, steps=steps_list)
+    assert runner.run(YES) == EXIT_ABORTED
+    assert_safe_end(hv)
+
+
+def test_describe_plan_notes_continuous_mode():
+    from backend.step_runner import describe_plan
+    lines, _ = describe_plan([step(300, 60, daq=True), step(400, 30, daq=False)], MAP3, settle_s=5.0,
+                             daq_cmd="x", daq_continuous=True)
+    assert any("continuous monitoring by default" in l for l in lines)
+    assert any("science (Y)" in l for l in lines)
+    assert any("monitor only (CSV = N)" in l for l in lines)

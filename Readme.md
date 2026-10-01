@@ -17,3 +17,8 @@
   - To be added
 
 ---
+
+## Usages
+
+- Make a scan grid of three electrodes
+<code>python generate_scan_csv.py scan_steps.csv   --channel-map Grid=0,Anode=4,Cathode=5   --grid-min 420 --grid-max 430 --grid-step 10   --anode-offset-min 120 --anode-offset-max 150 --anode-offset-step 30   --cathode-offset-min 1000 --cathode-offset-max 1000 --cathode-offset-step 100   --hold-s 300 --force<code/>

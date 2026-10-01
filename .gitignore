@@ -1,0 +1,3 @@
+run_logs/
+__pycache__/
+*.pyc

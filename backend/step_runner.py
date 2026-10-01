@@ -3,6 +3,17 @@
 Per step: ramp (via calculate_safe_trajectory checkpoints) -> verify VMon settled
 -> hold, optionally running a DAQ command while a watchdog polls ALL six crate
 channels -> next step. Ends with a controlled ramp to 0 V, then power off.
+
+With daq_continuous=True (only meaningful for the run_daq.py --daq-backup path, never for an
+arbitrary --daq-cmd): an INDEFINITE ("monitor") DAQ subprocess runs by default, covering every ramp
+and every non-acquiring ("N") hold, so nothing goes unmonitored. Once an acquiring ("Y") step's ramp
+has settled, the monitor is stopped, a FIXED-DURATION ("science") DAQ subprocess runs for exactly
+that step's hold time, and a fresh monitor subprocess starts again once it finishes, covering
+everything up to the next "Y" step. tpx3-daq's Run_Datataking writes one file per run and has no way
+to roll a running acquisition over to a new file, so this stop/start is what gives every "Y" step
+its own distinct data file instead of it landing inside a shared monitor file. There is a brief
+(tunable via --daq-startup-grace-s) gap whenever a monitor subprocess (re)starts. The final
+ramp-to-zero (run end, abort, or trip) is never covered by DAQ, by design.
 """
 import csv
 import os
@@ -82,17 +93,27 @@ def checkpoints_for(cur, targets, grid_v_now, offset, min_delta):
     return plan_ramp_checkpoints(cur, targets, offset, min_delta, waypoints)
 
 
-def describe_plan(steps, channels, settle_s, offset=50.0, min_delta=20.0, daq_cmd=None):
+def describe_plan(steps, channels, settle_s, offset=50.0, min_delta=20.0, daq_cmd=None, daq_continuous=False,
+                  daq_startup_grace_s=0.0):
     """Human-readable plan lines (including every checkpoint) and a rough duration estimate in seconds."""
     lines = ["Channel map: " + ", ".join(f"{n}=Ch{i}" for n, i in channels.items())]
-    total, prev = 0.0, {n: 0.0 for n in channels}
+    if daq_continuous and daq_cmd:
+        lines.append("DAQ: continuous monitoring by default; each 'Y' step gets its own separate, "
+                     "fixed-duration acquisition for exactly its hold time, then monitoring resumes")
+    total = daq_startup_grace_s if (daq_continuous and daq_cmd) else 0.0   # initial monitor segment before step 1
+    prev = {n: 0.0 for n in channels}
     for k, (targets, hold, want_daq) in enumerate(steps, 1):
-        if want_daq is True:
+        acquiring = want_daq is True or (want_daq is None and daq_cmd)
+        if daq_continuous and daq_cmd:
+            daq_note = "science (Y)" if acquiring else "monitor only (CSV = N)" if want_daq is False else "monitor only"
+            if acquiring and k < len(steps):
+                total += daq_startup_grace_s   # a fresh monitor segment (re)starts after this step's science burst
+        elif acquiring:
             daq_note = "DAQ"
         elif want_daq is False:
             daq_note = "no DAQ (CSV)"
         else:
-            daq_note = "DAQ" if daq_cmd else "no DAQ"
+            daq_note = "no DAQ"
         lines.append(f"  Step {k}: " + ", ".join(f"{n}={v:g} V" for n, v in targets.items())
                     + f", hold {hold:g} s, {daq_note}")
         cps = checkpoints_for(prev, targets, prev.get("Grid", 0.0), offset, min_delta)
@@ -112,7 +133,8 @@ class StepRunner:
                  v_tol=10.0, hold_v_tol=50.0, settle_s=5.0, zero_tol=5.0, poll_s=1.0,
                  on_trip="shutdown", daq_cmd=None, daq_grace_s=120.0, power_on=False,
                  keep_power=False, max_read_failures=3, status_every_s=30.0,
-                 min_delta=20.0, stage_offset=50.0, delta_meas_tol=5.0):
+                 min_delta=20.0, stage_offset=50.0, delta_meas_tol=5.0,
+                 daq_continuous=False, daq_startup_grace_s=5.0):
         self.hv, self.channels, self.steps = hv, dict(channels), steps
         self.outdir = Path(outdir)
         self.clock = clock or RealClock()
@@ -123,8 +145,11 @@ class StepRunner:
         self.power_on, self.keep_power = power_on, keep_power
         self.max_read_failures, self.status_every_s = max_read_failures, status_every_s
         self.min_delta, self.stage_offset, self.delta_meas_tol = min_delta, stage_offset, delta_meas_tol
+        self.daq_continuous, self.daq_startup_grace_s = daq_continuous, daq_startup_grace_s
         if stage_offset < min_delta:
             raise ValueError(f"stage offset {stage_offset:g} V must be >= min delta {min_delta:g} V")
+        if daq_continuous and not daq_cmd:
+            raise ValueError("daq_continuous requires a DAQ command")
         for k, (targets, _, want_daq) in enumerate(self.steps, 1):
             bad = ordering_violations(targets, min_delta, tol=0.0, floor=-1.0, strict_cathode=True)
             if bad:
@@ -138,6 +163,7 @@ class StepRunner:
         self._last_status = -1e9
         self._names = {i: n for n, i in self.channels.items()}
         self.last_snap = None
+        self._active_daq_proc = None  # set only while a CONTINUOUS DAQ subprocess should still be alive
 
     def request_abort(self, reason):
         if self._abort_reason is None:
@@ -214,9 +240,16 @@ class StepRunner:
         if self._abort_reason:
             raise RunAbort(self._abort_reason)
 
+    def _check_daq_alive(self):
+        """Only set while the continuous DAQ subprocess is expected to still be running."""
+        proc = self._active_daq_proc
+        if proc is not None and proc.poll() is not None:
+            raise RunAbort(f"continuous DAQ exited unexpectedly (code {proc.returncode})")
+
     def _cycle(self, phase, targets=None):
         """One watchdog cycle: wait, read, check, log. Returns the snapshot (None on a transient read failure)."""
         self._sleep()
+        self._check_daq_alive()
         snap = self._poll()
         if snap is None:
             return None
@@ -327,6 +360,105 @@ class StepRunner:
             return True  # constructor already guaranteed self.daq_cmd is set in this case
         return bool(self.daq_cmd)
 
+    def run_all_steps(self):
+        """Runs every step in order. In daq_continuous mode this alternates between an INDEFINITE monitor
+        DAQ subprocess (covering ramps and non-acquiring holds) and, for each acquiring ("Y") step, a
+        FIXED-DURATION science DAQ subprocess covering just that step's hold (see
+        _run_steps_with_continuous_daq). Otherwise each step decides its own DAQ via hold()."""
+        if self.daq_continuous:
+            self._run_steps_with_continuous_daq()
+            return
+        for i, (targets, hold_s, want_daq) in enumerate(self.steps):
+            self.log.info("=== step %d/%d ===", i + 1, len(self.steps))
+            self.go_to(targets, i)
+            self.hold(i, targets, hold_s, want_daq)
+
+    def _run_steps_with_continuous_daq(self):
+        """daq_continuous mode. An INDEFINITE ('--continuous') monitor DAQ subprocess runs by default,
+        covering ramps and non-acquiring ("N") holds. Once an acquiring ("Y") step's ramp has settled, the
+        monitor is stopped, a FIXED-DURATION science DAQ subprocess runs for exactly that step's hold time
+        (its own distinct data file -- tpx3-daq has no way to roll a running acquisition over to a new
+        file, so a separate science file needs a separate subprocess), and a fresh monitor subprocess is
+        started again for whatever comes next. A monitor segment's data file(s) are only known once it
+        stops, so N-step rows are buffered and flushed to step_data_files.csv together when that happens."""
+        self._monitor_n, self._monitor_proc, self._pending_monitor_rows = 0, None, []
+        self._start_monitor()
+        try:
+            for i, (targets, hold_s, want_daq) in enumerate(self.steps):
+                self.log.info("=== step %d/%d ===", i + 1, len(self.steps))
+                started = datetime.now()
+                self.go_to(targets, i)
+                if self._wants_daq(want_daq):
+                    self._stop_monitor()
+                    self._run_science_hold(i, targets, hold_s, started)
+                    if i < len(self.steps) - 1:   # no point monitoring after the last step (ramp-down isn't covered)
+                        self._start_monitor()
+                else:
+                    t0 = self.clock.time()
+                    while self.clock.time() - t0 < hold_s:
+                        self._cycle("hold", targets)
+                    self._pending_monitor_rows.append((i + 1, started, datetime.now(), hold_s, "monitor", targets))
+        finally:
+            if self._monitor_proc is not None:
+                self._stop_monitor()
+
+    def _start_monitor(self):
+        self._monitor_n += 1
+        mdir = self.outdir / f"monitor_{self._monitor_n:02d}"
+        mdir.mkdir(parents=True, exist_ok=True)
+        argv = build_daq_argv(self.daq_cmd, outdir=str(mdir)) + ["--continuous"]
+        self.log.info("starting monitor DAQ (segment %d): %s", self._monitor_n, shlex.join(argv))
+        self._monitor_log_path = mdir / "daq.log"
+        self._monitor_log_file = open(self._monitor_log_path, "w")
+        self._monitor_proc = subprocess.Popen(argv, stdout=self._monitor_log_file, stderr=subprocess.STDOUT,
+                                              start_new_session=True)
+        self._active_daq_proc = self._monitor_proc
+        t0 = self.clock.time()
+        while self.clock.time() - t0 < self.daq_startup_grace_s:
+            self._cycle("ramp")
+
+    def _stop_monitor(self):
+        self._active_daq_proc = None
+        stop_process(self._monitor_proc, self.log)
+        self._monitor_log_file.close()
+        try:
+            text = self._monitor_log_path.read_text(errors="replace")
+        except OSError:
+            text = ""
+        files = [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("DAQ_OUTPUT:")]
+        self.log.info("monitor segment %d: data file(s): %s", self._monitor_n,
+                      "; ".join(files) if files else "none reported")
+        if self._pending_monitor_rows:
+            self._append_step_rows(self._pending_monitor_rows, files, kind_column=True)
+        self._pending_monitor_rows = []
+        self._monitor_proc = None
+
+    def _run_science_hold(self, idx, targets, hold_s, started):
+        """A fixed-duration DAQ subprocess for exactly this step's hold -- run only while the indefinite
+        monitor is stopped, so this is what gives a "Y" step its own distinct data file."""
+        stepdir = self.outdir / f"step_{idx + 1:02d}"
+        stepdir.mkdir(parents=True, exist_ok=True)
+        argv = build_daq_argv(self.daq_cmd, outdir=str(stepdir)) + ["--duration", f"{hold_s:g}"]
+        self.log.info("step %d: starting science DAQ (%g s): %s", idx + 1, hold_s, shlex.join(argv))
+        t0, proc = self.clock.time(), None
+        try:
+            with open(stepdir / "daq.log", "w") as daq_log:
+                # NOT tracked via _active_daq_proc/_check_daq_alive: this subprocess is SUPPOSED to exit on
+                # its own once its --duration elapses, unlike the monitor, which must never exit early.
+                proc = subprocess.Popen(argv, stdout=daq_log, stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    while proc.poll() is None:
+                        self._cycle("hold", targets)
+                        if self.clock.time() - t0 > hold_s + self.daq_grace_s:
+                            raise RunAbort(f"DAQ still running {self.daq_grace_s:g} s past the hold time")
+                finally:
+                    stop_process(proc, self.log)
+            if proc.returncode != 0:
+                raise RunAbort(f"DAQ exited with code {proc.returncode} (see {stepdir / 'daq.log'})")
+            self.log.info("step %d: science DAQ finished (code 0)", idx + 1)
+        finally:
+            self._record_step_data(idx, targets, hold_s, started, stepdir / "daq.log", "science", kind_column=True)
+
     def hold(self, idx, targets, hold_s, want_daq=None):
         if self._wants_daq(want_daq):
             self._hold_with_daq(idx, targets, hold_s)
@@ -364,25 +496,34 @@ class StepRunner:
             self.log.info("step %d: DAQ finished (code 0) after %.0f s", idx + 1, elapsed)
         finally:
             self._record_step_data(idx, targets, hold_s, started, stepdir / "daq.log",
-                                   None if proc is None else proc.returncode)
+                                   None if proc is None else proc.returncode, kind_column=False)
 
-    def _record_step_data(self, idx, targets, hold_s, started, daq_log_path, returncode):
-        """Log the data file(s) the DAQ reported ('DAQ_OUTPUT: <path>') against this HV step. The wall-clock
-        times use the hv_log 'Timestamp' format so the files can be joined to the HV data."""
+    def _record_step_data(self, idx, targets, hold_s, started, daq_log_path, label, kind_column):
+        """Log the data file(s) the DAQ reported ('DAQ_OUTPUT: <path>') against this HV step. `label` is a
+        returncode (non-continuous mode) or a "science"/"monitor" kind (daq_continuous mode); kind_column
+        picks which of those the CSV column holds."""
         try:
             text = daq_log_path.read_text(errors="replace")
         except OSError:
             text = ""
         files = [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("DAQ_OUTPUT:")]
         self.log.info("step %d: DAQ data file(s): %s", idx + 1, "; ".join(files) if files else "none reported")
+        self._append_step_rows([(idx + 1, started, datetime.now(), hold_s, label, targets)], files,
+                               kind_column=kind_column)
+
+    def _append_step_rows(self, rows, files, kind_column):
+        """rows: (step, start, end, hold_s, kind_or_returncode, targets). The wall-clock timestamps use the
+        hv_log 'Timestamp' format so the files can be joined to the HV data."""
         csv_path = self.outdir / "step_data_files.csv"
         fmt = "%Y-%m-%d %H:%M:%S"
         with open(csv_path, "a", newline="") as f:
             writer = csv.writer(f)
             if csv_path.stat().st_size == 0:
-                writer.writerow(["step", "start", "end", "hold_s", "daq_returncode", "targets", "data_files"])
-            writer.writerow([idx + 1, started.strftime(fmt), datetime.now().strftime(fmt), f"{hold_s:g}", returncode,
-                             ";".join(f"{n}={v:g}" for n, v in targets.items()), ";".join(files)])
+                label = "kind" if kind_column else "daq_returncode"
+                writer.writerow(["step", "start", "end", "hold_s", label, "targets", "data_files"])
+            for idx, start, end, hold_s, kind_or_code, targets in rows:
+                writer.writerow([idx, start.strftime(fmt), end.strftime(fmt), f"{hold_s:g}", kind_or_code,
+                                 ";".join(f"{n}={v:g}" for n, v in targets.items()), ";".join(files)])
 
     # ---------------------------------------------------------------- ramp-down
     def _wait_zero(self, timeout):
@@ -458,10 +599,7 @@ class StepRunner:
             try:
                 self.preflight(confirm)
                 self._power_on_if_needed()
-                for i, (targets, hold_s, want_daq) in enumerate(self.steps):
-                    self.log.info("=== step %d/%d ===", i + 1, len(self.steps))
-                    self.go_to(targets, i)
-                    self.hold(i, targets, hold_s, want_daq)
+                self.run_all_steps()
                 self.log.info("all steps complete")
                 return self._finish("sequence complete", False, EXIT_OK)
             except Refused as e:
